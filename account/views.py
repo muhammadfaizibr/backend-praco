@@ -72,7 +72,7 @@ class EmailAuthenticationView(APIView):
 
     def post(self, request):
         code = random.randint(1000, 9999)
-        serializer = ForgetPasswordSerializer(data=request.data, context={'code': code})
+        serializer = EmailAuthenticationSerializer(data=request.data, context={'code': code})
         if serializer.is_valid(raise_exception=True):
             return Response(
                 {
