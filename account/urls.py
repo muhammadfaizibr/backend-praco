@@ -1,31 +1,29 @@
 from django.urls import path
 from account.views import (
     UserRegistrationView,
-    UserLoginView, 
-    UserProfileView, 
-    UserUpdatePasswordRequestView, 
-    SendVerificationEmailView, 
-    ForgetPasswordView, 
-    UserResetPasswordView, 
-    UserUpdatePasswordView, 
-    DestroyAccountView
+    UserLoginView,
+    UserProfileView,
+    EmailAuthenticationView,
+    UserResetPasswordView,
+    UserUpdatePasswordView,
 )
-
 from rest_framework_simplejwt.views import (
     TokenVerifyView,
     TokenRefreshView,
 )
 
 urlpatterns = [
+    # Authentication endpoints
     path('register/', UserRegistrationView.as_view(), name='user-register'),
     path('login/', UserLoginView.as_view(), name='user-login'),
+    path('token/verify/', TokenVerifyView.as_view(), name='token-verify'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+
+    # User profile management
     path('profile/', UserProfileView.as_view(), name='user-profile'),
-    path('update-password-request/', UserUpdatePasswordRequestView.as_view(), name='update-password-request'),
-    path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('verify-email/', SendVerificationEmailView.as_view()),
-    path('forget-password/', ForgetPasswordView.as_view()),
-    path('reset-password/', UserResetPasswordView.as_view()),
-    path('update-password/', UserUpdatePasswordView.as_view()),
-    path('delete-account/<int:pk>/', DestroyAccountView.as_view(), name='delete-department-alignment'),
+
+    # Password management
+    path('email-authentication/', EmailAuthenticationView.as_view(), name='email-authentication'),
+    path('reset-password/', UserResetPasswordView.as_view(), name='reset-password'),
+    path('update-password/', UserUpdatePasswordView.as_view(), name='update-password'),
 ]
