@@ -5,7 +5,7 @@ from .models import Category, Product, ProductImage, ProductVariant, TableField,
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'created_at', 'image_thumbnail')
-    search_fields = ('name',)
+    search_fields = ('name', 'description')
     list_filter = ('created_at',)
     readonly_fields = ('image_thumbnail',)
     fields = ('name', 'description', 'image', 'image_thumbnail')
@@ -19,10 +19,15 @@ class CategoryAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request)
 
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'category', 'is_new', 'created_at')
-    search_fields = ('name', 'category__name')
+    search_fields = ('name', 'category__name', 'description')
     list_filter = ('category', 'is_new', 'created_at')
 
     class ProductImageInline(admin.TabularInline):
@@ -50,7 +55,12 @@ class ProductAdmin(admin.ModelAdmin):
         super().save_related(request, form, formsets, change)
         obj = form.instance
         if obj.images.count() > 5:
-            raise forms.ValidationError("A Product cannot have more than 5 images.")
+            raise ValueError("A Product cannot have more than 5 images.")
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 class TableFieldInline(admin.TabularInline):
     model = TableField
@@ -83,10 +93,15 @@ class ProductVariantAdmin(admin.ModelAdmin):
         super().save_related(request, form, formsets, change)
         obj = form.instance
         if not TableField.objects.filter(product_variant=obj).exists():
-            raise forms.ValidationError("At least one Table Field is required for a Product Variant.")
+            raise ValueError("At least one Table Field is required for a Product Variant.")
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('product')
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 class ItemDataInline(admin.TabularInline):
     model = ItemData
@@ -119,9 +134,13 @@ class ItemDataInline(admin.TabularInline):
 
 @admin.register(Item)
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('product_variant', 'created_at')
-    search_fields = ('product_variant__name',)
-    list_filter = ('product_variant', 'created_at')
+    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'title', 'created_at')
+    search_fields = ('sku', 'product_variant__name', 'title')
+    list_filter = ('product_variant', 'status', 'is_physical_product', 'track_inventory', 'created_at')
+    fields = (
+        'product_variant', 'sku', 'status', 'is_physical_product', 'weight', 'weight_unit',
+        'track_inventory', 'stock', 'title'
+    )
 
     class ItemImageInline(admin.TabularInline):
         model = ItemImage
@@ -148,11 +167,16 @@ class ItemAdmin(admin.ModelAdmin):
         super().save_related(request, form, formsets, change)
         obj = form.instance
         if obj.images.count() > 5:
-            raise forms.ValidationError("An Item cannot have more than 5 images.")
+            raise ValueError("An Item cannot have more than 5 images.")
 
     def get_form(self, request, obj=None, **kwargs):
         request._item_obj = obj
         return super().get_form(request, obj, **kwargs)
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 @admin.register(TableField)
 class TableFieldAdmin(admin.ModelAdmin):
@@ -162,6 +186,11 @@ class TableFieldAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('product_variant')
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 @admin.register(ItemData)
 class ItemDataAdmin(admin.ModelAdmin):
@@ -178,6 +207,11 @@ class ItemDataAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('item__product_variant', 'field')
 
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 @admin.register(UserExclusivePrice)
 class UserExclusivePriceAdmin(admin.ModelAdmin):
     list_display = ('user', 'product', 'exclusive_price', 'created_at')
@@ -186,3 +220,8 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user', 'product')
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }

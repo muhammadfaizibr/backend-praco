@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from ecommerce.models import Category, Product, ProductImage, ProductVariant, TableField, Item, ItemImage, ItemData, UserExclusivePrice
+from .models import Category, Product, ProductImage, ProductVariant, TableField, Item, ItemImage, ItemData, UserExclusivePrice
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -38,7 +38,40 @@ class ItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Item
-        fields = ['id', 'product_variant', 'created_at', 'images']
+        fields = [
+            'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
+            'track_inventory', 'stock', 'title', 'status', 'created_at', 'images'
+        ]
+
+    def validate(self, data):
+        is_physical_product = data.get('is_physical_product', False)
+        weight = data.get('weight')
+        weight_unit = data.get('weight_unit')
+        track_inventory = data.get('track_inventory', False)
+        stock = data.get('stock')
+        title = data.get('title')
+
+        # Validate physical product fields
+        if is_physical_product:
+            if weight is None or weight <= 0:
+                raise serializers.ValidationError("Weight must be provided and greater than 0 for a physical product.")
+            if not weight_unit:
+                raise serializers.ValidationError("Weight unit must be provided for a physical product.")
+        else:
+            data['weight'] = None
+            data['weight_unit'] = None
+
+        # Validate inventory tracking fields
+        if track_inventory:
+            if stock is None or stock < 0:
+                raise serializers.ValidationError("Stock must be provided and non-negative when tracking inventory.")
+            if not title:
+                raise serializers.ValidationError("Title must be provided when tracking inventory.")
+        else:
+            data['stock'] = None
+            data['title'] = None
+
+        return data
 
 class ItemDataSerializer(serializers.ModelSerializer):
     field_id = serializers.PrimaryKeyRelatedField(
@@ -81,7 +114,6 @@ class ItemDataSerializer(serializers.ModelSerializer):
             if value_text is not None or value_number is not None:
                 raise serializers.ValidationError("For an image field, only value_image should be provided.")
 
-        # Update data with normalized values
         data['value_text'] = value_text
         data['value_number'] = value_number
         data['value_image'] = value_image

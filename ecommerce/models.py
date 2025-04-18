@@ -1,10 +1,11 @@
 from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from ckeditor.fields import RichTextField
 
 class Category(models.Model):
     name = models.CharField(max_length=255)
-    description = models.TextField(blank=True)
+    description = RichTextField(blank=True)
     image = models.ImageField(upload_to='category_images/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -22,7 +23,7 @@ class Category(models.Model):
 class Product(models.Model):
     category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
-    description = models.TextField()
+    description = RichTextField()
     is_new = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -92,19 +93,65 @@ class TableField(models.Model):
         return f"{self.product_variant.name} - {self.name} ({self.field_type})"
 
 class Item(models.Model):
+    STATUS_CHOICES = (
+        ('draft', 'Draft'),
+        ('active', 'Active'),
+    )
+    WEIGHT_UNIT_CHOICES = (
+        ('lb', 'Pounds (lb)'),
+        ('kg', 'Kilograms (kg)'),
+        ('oz', 'Ounces (oz)'),
+        ('g', 'Grams (g)'),
+    )
+
     product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='items')
+    sku = models.CharField(max_length=100, unique=True)
+    is_physical_product = models.BooleanField(default=False)
+    weight = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    weight_unit = models.CharField(max_length=2, choices=WEIGHT_UNIT_CHOICES, blank=True, null=True)
+    track_inventory = models.BooleanField(default=False)
+    stock = models.IntegerField(blank=True, null=True)
+    title = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['product_variant']),
+            models.Index(fields=['sku']),
+            models.Index(fields=['status']),
             models.Index(fields=['created_at']),
         ]
         verbose_name = 'item'
         verbose_name_plural = 'items'
 
+    def clean(self):
+        # Validate physical product fields
+        if self.is_physical_product:
+            if self.weight is None or self.weight <= 0:
+                raise ValidationError("Weight must be provided and greater than 0 for a physical product.")
+            if not self.weight_unit:
+                raise ValidationError("Weight unit must be provided for a physical product.")
+        else:
+            self.weight = None
+            self.weight_unit = None
+
+        # Validate inventory tracking fields
+        if self.track_inventory:
+            if self.stock is None or self.stock < 0:
+                raise ValidationError("Stock must be provided and non-negative when tracking inventory.")
+            if not self.title:
+                raise ValidationError("Title must be provided when tracking inventory.")
+        else:
+            self.stock = None
+            self.title = None
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # Run validation before saving
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f"Item for {self.product_variant.name}"
+        return f"Item {self.sku} for {self.product_variant.name} ({self.status})"
 
 class ItemImage(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='images')
