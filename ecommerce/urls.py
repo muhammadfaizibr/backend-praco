@@ -2,7 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CategoryViewSet, ProductViewSet, ProductImageViewSet, ProductVariantViewSet,
-    TableFieldViewSet, ItemViewSet, ItemImageViewSet, ItemDataViewSet, UserExclusivePriceViewSet
+    PricingTierViewSet, PricingTierDataViewSet, TableFieldViewSet, ItemViewSet, ItemImageViewSet,
+    ItemDataViewSet, UserExclusivePriceViewSet
 )
 
 router = DefaultRouter()
@@ -10,6 +11,8 @@ router.register(r'categories', CategoryViewSet)
 router.register(r'products', ProductViewSet)
 router.register(r'product-images', ProductImageViewSet)
 router.register(r'product-variants', ProductVariantViewSet)
+router.register(r'pricing-tiers', PricingTierViewSet)
+router.register(r'pricing-tier-data', PricingTierDataViewSet)
 router.register(r'table-fields', TableFieldViewSet)
 router.register(r'items', ItemViewSet)
 router.register(r'item-images', ItemImageViewSet)

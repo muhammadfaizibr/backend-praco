@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'ecommerce',
     'administration',
     'payment',
+    'nested_admin',
 ]
 
 MIDDLEWARE = [
@@ -181,13 +182,13 @@ CORS_ALLOWED_ORIGINS = [
 UNFOLD = {
     "SITE_TITLE": "Praco Packaging Supplies",
     "SITE_HEADER": "Praco Packaging Supplies",
-    "SITE_LOGO": "images/logo.svg",
+    "SITE_LOGO": "/static/images/logo.svg",
     "SITE_FAVICONS": [
         {
             "rel": "icon",
-            "type": "image/png",
+            "type": "/static/images/logo.svg",
             "sizes": "32x32",
-            "href": "images/favicon-32x32.png",
+            "href": "/static/images/logo.svg",
         },
     ],
     "SHOW_HISTORY": True,

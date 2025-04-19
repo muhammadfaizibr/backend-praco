@@ -1,12 +1,12 @@
 /* Match Unfold's theme styles */
-html.light .form-row input[type="text"],
-html.light .form-row input[type="number"],
-html.light .form-row input[type="email"],
-html.light .form-row textarea,
-html.light .form-row select {
-    background-color: #ffffff;
+html .form-row input[type="text"],
+html .form-row input[type="number"],
+html .form-row input[type="email"],
+html .form-row textarea,
+html .form-row select {
+    background-color: rgb(249, 250, 251);
     color: var(--color-font-subtle-light);
-    border: 1px solid #d1d1d1;
+    border: 1px solid #e5e7eb;
     padding: 8px;
     border-radius: 4px;
     font-size: 14px;
@@ -21,9 +21,9 @@ html.dark .form-row input[type="number"],
 html.dark .form-row input[type="email"],
 html.dark .form-row textarea,
 html.dark .form-row select {
-    background-color: var(--color-base-950);
+    background-color: rgba(31, 41, 55);
     color: #ffffff;
-    border: 1px solid #333333;
+    border: 1px solid rgba(55, 65, 81);
     padding: 8px;
     border-radius: 4px;
     font-size: 14px;
@@ -43,23 +43,23 @@ html.dark .form-row select {
 }
 
 /* Ensure labels are visible and styled */
-html.light .form-row label {
+html .form-row label {
     color: var(--color-font-subtle-light);
     font-weight: 500;
 }
 
 html.dark .form-row label {
-    color: #ddd !important;
+    color: rgb(249, 250, 251) !important;
     font-weight: 500;
 }
 
 /* Fix inline forms (e.g., TabularInline) */
-html.light .inline-related input,
-html.light .inline-related select,
-html.light .inline-related textarea {
-    background-color: #ffffff;
+html .inline-related input,
+html .inline-related select,
+html .inline-related textarea {
+    background-color: rgb(249, 250, 251);
     color: var(--color-font-subtle-light);
-    border: 1px solid #d1d1d1;
+    border: 1px solid #e5e7eb;
     padding: 8px;
     border-radius: 4px;
 }
@@ -67,9 +67,9 @@ html.light .inline-related textarea {
 html.dark .inline-related input,
 html.dark .inline-related select,
 html.dark .inline-related textarea {
-    background-color: var(--color-base-950);
-    color: #cccc;
-    border: 1px solid #333;
+    background-color: rgba(31, 41, 55);
+    color: rgb(249, 250, 251);
+    border: 1px solid rgba(55, 65, 81);
     padding: 8px;
     border-radius: 4px;
 }
@@ -83,13 +83,12 @@ html.dark .inline-related textarea {
 }
 
 /* Ensure inline field labels are visible */
-html.light .inline-related label {
+html .inline-related label {
     color: var(--color-font-subtle-light);
     font-weight: 500;
 }
 
-
 html.dark .inline-related label {
-    color: #ddd !important;
+    color: rgb(249, 250, 251) !important;
     font-weight: 500;
 }

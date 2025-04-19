@@ -3,9 +3,11 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
 from decimal import Decimal
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 
 class Category(models.Model):
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, unique=True)
     description = RichTextField(blank=True)
     image = models.ImageField(upload_to='category_images/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -17,6 +19,14 @@ class Category(models.Model):
         ]
         verbose_name = 'category'
         verbose_name_plural = 'categories'
+
+    def clean(self):
+        if not self.name:
+            raise ValidationError("Category name cannot be empty.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
@@ -36,6 +46,16 @@ class Product(models.Model):
         verbose_name = 'product'
         verbose_name_plural = 'products'
 
+    def clean(self):
+        if not self.name:
+            raise ValidationError("Product name cannot be empty.")
+        if not self.description:
+            raise ValidationError("Product description cannot be empty.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.category.name} - {self.name}"
 
@@ -51,12 +71,29 @@ class ProductImage(models.Model):
         verbose_name = 'product image'
         verbose_name_plural = 'product images'
 
+    def clean(self):
+        if not self.image:
+            raise ValidationError("Product image cannot be empty.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Image for {self.product.name}"
 
 class ProductVariant(models.Model):
+    SHOW_UNITS_PER_CHOICES = (
+        ('pack', 'Pack Only'),
+        ('pallet', 'Pallet Only'),
+        ('both', 'Both Pack and Pallet'),
+    )
+
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='product_variants')
     name = models.CharField(max_length=255)
+    units_per_pack = models.PositiveIntegerField(default=1, help_text="Number of units per pack")
+    units_per_pallet = models.PositiveIntegerField(default=1, help_text="Number of units per pallet")
+    show_units_per = models.CharField(max_length=10, choices=SHOW_UNITS_PER_CHOICES, default='pack')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -67,8 +104,118 @@ class ProductVariant(models.Model):
         verbose_name = 'product variant'
         verbose_name_plural = 'product variants'
 
+    def clean(self):
+        if not self.name:
+            raise ValidationError("Product variant name cannot be empty.")
+        if self.units_per_pack <= 0:
+            raise ValidationError("Units per pack must be greater than 0.")
+        if self.units_per_pallet <= 0:
+            raise ValidationError("Units per pallet must be greater than 0.")
+
+    def create_default_table_fields(self):
+        default_fields = [
+            {'name': 'title', 'field_type': 'text'},
+            {'name': 'status', 'field_type': 'text'},
+            {'name': 'is_physical_product', 'field_type': 'text'},
+            {'name': 'weight', 'field_type': 'number'},
+            {'name': 'weight_unit', 'field_type': 'text'},
+            {'name': 'track_inventory', 'field_type': 'text'},
+            {'name': 'stock', 'field_type': 'number'},
+            {'name': 'sku', 'field_type': 'text'},
+            {'name': 'image', 'field_type': 'image'},
+        ]
+        for field in default_fields:
+            if not TableField.objects.filter(product_variant=self, name=field['name']).exists():
+                TableField.objects.create(
+                    product_variant=self,
+                    name=field['name'],
+                    field_type=field['field_type']
+                )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+        self.create_default_table_fields()
+
     def __str__(self):
         return f"{self.product.name} - {self.name}"
+
+class PricingTier(models.Model):
+    TIER_TYPES = (
+        ('pack', 'Pack'),
+        ('pallet', 'Pallet'),
+    )
+
+    product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='pricing_tiers')
+    tier_type = models.CharField(max_length=10, choices=TIER_TYPES)
+    range_start = models.PositiveIntegerField()
+    range_end = models.PositiveIntegerField(null=True, blank=True, help_text="Leave blank for 'X+' ranges")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['product_variant', 'tier_type']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'pricing tier'
+        verbose_name_plural = 'pricing tiers'
+
+    def clean(self):
+        if self.range_start <= 0:
+            raise ValidationError("Range start must be greater than 0.")
+        if self.range_end is not None and self.range_end < self.range_start:
+            raise ValidationError("Range end must be greater than or equal to range start.")
+
+        if not self.product_variant or not self.product_variant.pk:
+            return
+
+        # Check for overlapping ranges only among PricingTiers with the same tier_type
+        existing_tiers = PricingTier.objects.filter(
+            product_variant=self.product_variant,
+            tier_type=self.tier_type
+        ).exclude(id=self.id)
+
+        for tier in existing_tiers:
+            current_end = self.range_end if self.range_end is not None else float('inf')
+            tier_end = tier.range_end if tier.range_end is not None else float('inf')
+            if self.range_start <= tier_end and current_end >= tier.range_start:
+                raise ValidationError(f"Range {self.range_start}-{self.range_end or '+'} overlaps with existing range {tier.range_start}-{tier.range_end or '+'} for {self.tier_type}.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        range_str = f"{self.range_start}-{self.range_end}" if self.range_end else f"{self.range_start}+"
+        return f"{self.product_variant} - {self.tier_type} - {range_str}"
+
+class PricingTierData(models.Model):
+    item = models.ForeignKey('Item', on_delete=models.CASCADE, related_name='pricing_tier_data')
+    pricing_tier = models.ForeignKey(PricingTier, on_delete=models.CASCADE, related_name='pricing_data')
+    price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price per pack if tier_type is 'pack', per pallet if 'pallet'")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('item', 'pricing_tier')
+        indexes = [
+            models.Index(fields=['item', 'pricing_tier']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'pricing tier data'
+        verbose_name_plural = 'pricing tier data'
+
+    def clean(self):
+        if self.price <= 0:
+            raise ValidationError("Price must be greater than 0.")
+        if self.pricing_tier.product_variant != self.item.product_variant:
+            raise ValidationError("Pricing tier must belong to the same product variant as the item.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.item} - {self.pricing_tier} - Price: {self.price}"
 
 class TableField(models.Model):
     FIELD_TYPES = (
@@ -77,9 +224,14 @@ class TableField(models.Model):
         ('image', 'Image'),
         ('price', 'Price'),
     )
+    RESERVED_NAMES = [
+        'title', 'status', 'is_physical_product', 'weight', 'weight_unit',
+        'track_inventory', 'stock', 'sku', 'image'
+    ]
+
     product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='table_fields')
     name = models.CharField(max_length=255)
-    field_type = models.CharField(max_length=20, choices=FIELD_TYPES, db_index=True)  # Added db_index
+    field_type = models.CharField(max_length=20, choices=FIELD_TYPES, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -90,6 +242,21 @@ class TableField(models.Model):
         ]
         verbose_name = 'table field'
         verbose_name_plural = 'table fields'
+
+    def clean(self):
+        if self.name.lower() in self.RESERVED_NAMES:
+            if self.id is None:
+                existing_field = TableField.objects.filter(product_variant=self.product_variant, name=self.name).exists()
+                if existing_field:
+                    raise ValidationError(f"Field name '{self.name}' is reserved and cannot be used.")
+            else:
+                original = TableField.objects.get(id=self.id)
+                if original.name != self.name:
+                    raise ValidationError(f"Field name '{self.name}' is reserved and cannot be used.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.product_variant.name} - {self.name} ({self.field_type})"
@@ -128,6 +295,8 @@ class Item(models.Model):
         verbose_name_plural = 'items'
 
     def clean(self):
+        if not self.sku:
+            raise ValidationError("SKU cannot be empty.")
         if self.is_physical_product:
             if self.weight is None or self.weight <= 0:
                 raise ValidationError("Weight must be provided and greater than 0 for a physical product.")
@@ -136,7 +305,6 @@ class Item(models.Model):
         else:
             self.weight = None
             self.weight_unit = None
-
         if self.track_inventory:
             if self.stock is None or self.stock < 0:
                 raise ValidationError("Stock must be provided and non-negative when tracking inventory.")
@@ -164,6 +332,14 @@ class ItemImage(models.Model):
         ]
         verbose_name = 'item image'
         verbose_name_plural = 'item images'
+
+    def clean(self):
+        if not self.image:
+            raise ValidationError("Item image cannot be empty.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Image for {self.item}"
@@ -224,6 +400,7 @@ class ItemData(models.Model):
         elif self.field.field_type == 'price':
             return f"{self.item} - {self.field.name}: ${self.value_number}"
         return f"{self.item} - {self.field.name}: {self.value_text or self.value_number or '-'}"
+
 
 class UserExclusivePrice(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

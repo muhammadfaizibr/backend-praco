@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Category, Product, ProductImage, ProductVariant, TableField, Item, ItemImage, ItemData, UserExclusivePrice
+from ecommerce.models import Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData, TableField, Item, ItemImage, ItemData, UserExclusivePrice
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -18,15 +18,37 @@ class ProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = ['id', 'category', 'name', 'description', 'is_new', 'created_at', 'images']
 
+class PricingTierDataSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PricingTierData
+        fields = ['id', 'item', 'pricing_tier', 'price', 'created_at']
+
+class PricingTierSerializer(serializers.ModelSerializer):
+    pricing_data = PricingTierDataSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PricingTier
+        fields = ['id', 'product_variant', 'tier_type', 'range_start', 'range_end', 'created_at', 'pricing_data']
+
 class ProductVariantSerializer(serializers.ModelSerializer):
+    pricing_tiers = PricingTierSerializer(many=True, read_only=True)
+
     class Meta:
         model = ProductVariant
-        fields = ['id', 'product', 'name', 'created_at']
+        fields = [
+            'id', 'product', 'name', 'units_per_pack', 'units_per_pallet',
+            'show_units_per', 'created_at', 'pricing_tiers'
+        ]
 
 class TableFieldSerializer(serializers.ModelSerializer):
     class Meta:
         model = TableField
         fields = ['id', 'product_variant', 'name', 'field_type', 'created_at']
+
+    def validate_name(self, value):
+        if value.lower() in TableField.RESERVED_NAMES:
+            raise serializers.ValidationError(f"Field name '{value}' is reserved and cannot be used.")
+        return value
 
 class ItemImageSerializer(serializers.ModelSerializer):
     class Meta:
@@ -35,12 +57,13 @@ class ItemImageSerializer(serializers.ModelSerializer):
 
 class ItemSerializer(serializers.ModelSerializer):
     images = ItemImageSerializer(many=True, read_only=True)
+    pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
 
     class Meta:
         model = Item
         fields = [
             'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
-            'track_inventory', 'stock', 'title', 'status', 'created_at', 'images'
+            'track_inventory', 'stock', 'title', 'status', 'created_at', 'images', 'pricing_tier_data'
         ]
 
     def validate(self, data):
@@ -51,7 +74,6 @@ class ItemSerializer(serializers.ModelSerializer):
         stock = data.get('stock')
         title = data.get('title')
 
-        # Validate physical product fields
         if is_physical_product:
             if weight is None or weight <= 0:
                 raise serializers.ValidationError("Weight must be provided and greater than 0 for a physical product.")
@@ -61,7 +83,6 @@ class ItemSerializer(serializers.ModelSerializer):
             data['weight'] = None
             data['weight_unit'] = None
 
-        # Validate inventory tracking fields
         if track_inventory:
             if stock is None or stock < 0:
                 raise serializers.ValidationError("Stock must be provided and non-negative when tracking inventory.")
@@ -89,7 +110,6 @@ class ItemDataSerializer(serializers.ModelSerializer):
         value_number = data.get('value_number')
         value_image = data.get('value_image')
 
-        # Normalize empty strings to None
         if value_text == '':
             value_text = None
         if value_number == '':
@@ -97,7 +117,6 @@ class ItemDataSerializer(serializers.ModelSerializer):
         if value_image == '':
             value_image = None
 
-        # Validate based on field_type
         if field.field_type == 'text':
             if value_text is None:
                 raise serializers.ValidationError("A non-empty value_text is required for a text field.")

@@ -1,61 +1,43 @@
 from django.contrib import admin
-from django.utils.safestring import mark_safe
-from .models import Category, Product, ProductImage, ProductVariant, TableField, Item, ItemImage, ItemData, UserExclusivePrice
+from django import forms
+from django.core.exceptions import ValidationError
+from .models import Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData, TableField, Item, ItemImage, ItemData, UserExclusivePrice
 
-@admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'created_at', 'image_thumbnail')
-    search_fields = ('name', 'description')
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
     list_filter = ('created_at',)
-    readonly_fields = ('image_thumbnail',)
-    fields = ('name', 'description', 'image', 'image_thumbnail')
-
-    def image_thumbnail(self, obj):
-        if obj.image:
-            return mark_safe(f'<img src="{obj.image.url}" width="50" height="50" />')
-        return '-'
-    image_thumbnail.short_description = 'Image'
-
-    def get_queryset(self, request):
-        return super().get_queryset(request)
+    ordering = ('name',)
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
-@admin.register(Product)
+class ProductImageInline(admin.TabularInline):
+    model = ProductImage
+    extra = 1
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 class ProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'category', 'is_new', 'created_at')
-    search_fields = ('name', 'category__name', 'description')
+    search_fields = ('name', 'category__name')
     list_filter = ('category', 'is_new', 'created_at')
-
-    class ProductImageInline(admin.TabularInline):
-        model = ProductImage
-        extra = 1
-        fields = ('image', 'image_preview', 'created_at')
-        readonly_fields = ('image_preview', 'created_at')
-        max_num = 5
-
-        def image_preview(self, obj):
-            if obj.image:
-                return mark_safe(f'<img src="{obj.image.url}" width="100" height="100" />')
-            return '-'
-        image_preview.short_description = 'Preview'
-
-        def get_queryset(self, request):
-            return super().get_queryset(request)
-
+    ordering = ('name',)
     inlines = [ProductImageInline]
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('category').prefetch_related('images')
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
-    def save_related(self, request, form, formsets, change):
-        super().save_related(request, form, formsets, change)
-        obj = form.instance
-        if obj.images.count() > 5:
-            raise ValueError("A Product cannot have more than 5 images.")
+class PricingTierInline(admin.TabularInline):
+    model = PricingTier
+    extra = 1
 
     class Media:
         css = {
@@ -65,38 +47,112 @@ class ProductAdmin(admin.ModelAdmin):
 class TableFieldInline(admin.TabularInline):
     model = TableField
     extra = 1
-    fields = ('name', 'field_type', 'created_at')
-    readonly_fields = ('created_at',)
+
+    def has_change_permission(self, request, obj=None):
+        if obj and obj.name in TableField.RESERVED_NAMES:
+            return False
+        return super().has_change_permission(request, obj)
 
     def has_delete_permission(self, request, obj=None):
-        if obj is None or not isinstance(obj, TableField):
-            return True
-        if ItemData.objects.filter(field=obj).exists():
+        if obj and obj.name in TableField.RESERVED_NAMES:
             return False
-        return True
+        return super().has_delete_permission(request, obj)
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product_variant')
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
-@admin.register(ProductVariant)
+class ProductVariantForm(forms.ModelForm):
+    class Meta:
+        model = ProductVariant
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        show_units_per = cleaned_data.get('show_units_per')
+
+        # Access the PricingTier inline formset data from self.data
+        tier_types = []
+        total_forms = int(self.data.get('pricing_tiers-TOTAL_FORMS', 0))
+        for i in range(total_forms):
+            if f'pricing_tiers-{i}-DELETE' in self.data:
+                continue
+            tier_type = self.data.get(f'pricing_tiers-{i}-tier_type')
+            if tier_type:
+                tier_types.append(tier_type)
+
+        # Validate PricingTiers
+        if not tier_types:
+            raise forms.ValidationError("At least one Pricing Tier is required for a Product Variant.")
+
+        pack_tiers = 'pack' in tier_types
+        pallet_tiers = 'pallet' in tier_types
+
+        if show_units_per == 'pack':
+            if not pack_tiers:
+                raise forms.ValidationError("A 'pack' Pricing Tier is required when show_units_per is 'pack'.")
+            if pallet_tiers:
+                raise forms.ValidationError("A 'pallet' Pricing Tier is not allowed when show_units_per is 'pack'.")
+        elif show_units_per == 'pallet':
+            if not pallet_tiers:
+                raise forms.ValidationError("A 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
+            if pack_tiers:
+                raise forms.ValidationError("A 'pack' Pricing Tier is not allowed when show_units_per is 'pallet'.")
+        elif show_units_per == 'both':
+            errors = []
+            if not pack_tiers:
+                errors.append("A 'pack' Pricing Tier is required when show_units_per is 'both'.")
+            if not pallet_tiers:
+                errors.append("A 'pallet' Pricing Tier is required when show_units_per is 'both'.")
+            if errors:
+                raise forms.ValidationError(errors)
+
+        return cleaned_data
+
 class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'created_at', 'table_fields_count')
+    list_display = ('name', 'product', 'units_per_pack', 'units_per_pallet', 'show_units_per', 'created_at')
     search_fields = ('name', 'product__name')
-    list_filter = ('product', 'created_at')
-    inlines = [TableFieldInline]
+    list_filter = ('product', 'show_units_per', 'created_at')
+    ordering = ('name',)
+    inlines = [PricingTierInline, TableFieldInline]
+    form = ProductVariantForm
 
-    def table_fields_count(self, obj):
-        return TableField.objects.filter(product_variant=obj).count()
-    table_fields_count.short_description = 'Number of Table Fields'
+    # Enable autocomplete search for ProductVariant
+    search_fields = ['name', 'product__name']  # Fields to search in autocomplete
 
     def save_related(self, request, form, formsets, change):
         super().save_related(request, form, formsets, change)
-        obj = form.instance
-        if not TableField.objects.filter(product_variant=obj).exists():
-            raise ValueError("At least one Table Field is required for a Product Variant.")
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product')
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class PricingTierDataInline(admin.TabularInline):
+    model = PricingTierData
+    extra = 1
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        # Filter pricing_tier based on the selected product_variant
+        if db_field.name == 'pricing_tier':
+            # Get the Item instance being edited (if editing an existing Item)
+            item_id = request.resolver_match.kwargs.get('object_id')
+            if item_id:
+                item = Item.objects.get(pk=item_id)
+                product_variant = item.product_variant
+                kwargs['queryset'] = PricingTier.objects.filter(product_variant=product_variant)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+        js = ('admin/js/filter_pricing_tier.js',)
+
+class ItemImageInline(admin.TabularInline):
+    model = ItemImage
+    extra = 1
 
     class Media:
         css = {
@@ -106,127 +162,52 @@ class ProductVariantAdmin(admin.ModelAdmin):
 class ItemDataInline(admin.TabularInline):
     model = ItemData
     extra = 1
-    fields = ('field', 'value_text', 'value_number', 'value_image', 'value_display', 'created_at')
-    readonly_fields = ('value_display', 'created_at')
-
-    def value_display(self, obj):
-        if obj.field and obj.field.field_type == 'image' and obj.value_image:
-            return mark_safe(f'<img src="{obj.value_image.url}" width="50" height="50" />')
-        elif obj.field and obj.field.field_type == 'price' and obj.value_number is not None:
-            return f"${obj.value_number:.2f}"  # Display price with 2 decimal places
-        return obj.value_text or obj.value_number or '-'
-    value_display.short_description = 'Value'
-
-    def get_formset(self, request, obj=None, **kwargs):
-        formset = super().get_formset(request, obj, **kwargs)
-        if obj and obj.product_variant:
-            table_fields = TableField.objects.filter(product_variant=obj.product_variant).select_related('product_variant')
-            if not table_fields.exists():
-                self.extra = 0
-                return formset
-            formset.form.base_fields['field'].queryset = table_fields
-        else:
-            self.extra = 0
-        return formset
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        if db_field.name == 'field' and hasattr(request, '_item_obj') and request._item_obj and request._item_obj.product_variant:
-            kwargs['queryset'] = TableField.objects.filter(product_variant=request._item_obj.product_variant).select_related('product_variant')
+        # Filter field based on the selected product_variant
+        if db_field.name == 'field':
+            item_id = request.resolver_match.kwargs.get('object_id')
+            if item_id:
+                item = Item.objects.get(pk=item_id)
+                product_variant = item.product_variant
+                kwargs['queryset'] = TableField.objects.filter(product_variant=product_variant)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
-@admin.register(Item)
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+        js = ('admin/js/filter_item_data.js',)
+
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'title', 'created_at')
-    search_fields = ('sku', 'product_variant__name', 'title')
-    list_filter = ('product_variant', 'status', 'is_physical_product', 'track_inventory', 'created_at')
-    fields = (
-        'product_variant', 'sku', 'status', 'is_physical_product', 'weight', 'weight_unit',
-        'track_inventory', 'stock', 'title'
-    )
+    list_display = ('sku', 'product_variant', 'is_physical_product', 'status', 'created_at')
+    search_fields = ('sku', 'product_variant__name')
+    list_filter = ('product_variant', 'is_physical_product', 'status', 'created_at')
+    ordering = ('sku',)
+    inlines = [PricingTierDataInline, ItemImageInline, ItemDataInline]
 
-    class ItemImageInline(admin.TabularInline):
-        model = ItemImage
-        extra = 1
-        fields = ('image', 'image_preview', 'created_at')
-        readonly_fields = ('image_preview', 'created_at')
-        max_num = 5
-
-        def image_preview(self, obj):
-            if obj.image:
-                return mark_safe(f'<img src="{obj.image.url}" width="100" height="50" />')
-            return '-'
-        image_preview.short_description = 'Preview'
-
-        def get_queryset(self, request):
-            return super().get_queryset(request)
-
-    inlines = [ItemDataInline, ItemImageInline]
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product_variant__product').prefetch_related('data_entries__field', 'images')
-
-    def save_related(self, request, form, formsets, change):
-        super().save_related(request, form, formsets, change)
-        obj = form.instance
-        if obj.images.count() > 5:
-            raise ValueError("An Item cannot have more than 5 images.")
-
-    def get_form(self, request, obj=None, **kwargs):
-        request._item_obj = obj
-        return super().get_form(request, obj, **kwargs)
+    # Enable autocomplete for product_variant
+    autocomplete_fields = ['product_variant']
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+        js = ('admin/js/filter_pricing_tier.js', 'admin/js/filter_item_data.js',)
 
-@admin.register(TableField)
-class TableFieldAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product_variant', 'field_type', 'created_at')
-    search_fields = ('name', 'product_variant__name')
-    list_filter = ('product_variant', 'field_type', 'created_at')
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product_variant')
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
-
-@admin.register(ItemData)
-class ItemDataAdmin(admin.ModelAdmin):
-    list_display = ('item', 'field', 'value_display', 'created_at')
-    search_fields = ('item__sku', 'field__name')
-    list_filter = ('item__product_variant', 'field__field_type', 'created_at')
-
-    def value_display(self, obj):
-        if obj.field.field_type == 'image' and obj.value_image:
-            return mark_safe(f'<img src="{obj.value_image.url}" width="50" height="50" />')
-        elif obj.field.field_type == 'price' and obj.value_number is not None:
-            return f"${obj.value_number:.2f}"
-        return obj.value_text or obj.value_number or '-'
-    value_display.short_description = 'Value'
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('item__product_variant', 'field')
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
-
-@admin.register(UserExclusivePrice)
 class UserExclusivePriceAdmin(admin.ModelAdmin):
     list_display = ('user', 'item', 'discount_percentage', 'created_at')
-    search_fields = ('user__email', 'user__first_name', 'item__sku')
-    list_filter = ('user', 'item__product_variant', 'created_at')
-    fields = ('user', 'item', 'discount_percentage')
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('user', 'item__product_variant')
+    search_fields = ('user__email', 'item__sku')
+    list_filter = ('created_at',)
+    ordering = ('user',)
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
+admin.site.register(Category, CategoryAdmin)
+admin.site.register(Product, ProductAdmin)
+admin.site.register(ProductVariant, ProductVariantAdmin)
+admin.site.register(Item, ItemAdmin)
+admin.site.register(UserExclusivePrice, UserExclusivePriceAdmin)
