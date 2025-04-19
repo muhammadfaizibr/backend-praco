@@ -71,16 +71,29 @@ class EmailAuthenticationView(APIView):
     renderer_classes = [CustomRenderer]
 
     def post(self, request):
-        code = random.randint(1000, 9999)
-        serializer = EmailAuthenticationSerializer(data=request.data, context={'code': code})
+        serializer = EmailAuthenticationSerializer(data=request.data)
         if serializer.is_valid(raise_exception=True):
+            email = serializer.validated_data['email']
+            exists = serializer.validated_data['exists']
+
+            # For forget password, require exists: true; for signup, require exists: false
+            # Frontend handles flow-specific logic
             return Response(
                 {
-                    "message": f"Verification code sent to {serializer.validated_data['email']}. Check inbox and spam folder.",
-                    "code": code
+                    "success": True,
+                    "exists": exists,
+                    "message": f"Verification code sent to {email}. Check inbox and spam folder."
                 },
                 status=status.HTTP_200_OK
             )
+        return Response(
+            {
+                "success": False,
+                "exists": False,
+                "message": "Invalid verification data."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 class UserResetPasswordView(APIView):
     renderer_classes = [CustomRenderer]

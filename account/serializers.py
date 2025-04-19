@@ -43,23 +43,41 @@ class UserProfileSerializer(serializers.ModelSerializer):
             }
         return fields
 
-
 class EmailAuthenticationSerializer(serializers.Serializer):
     email = serializers.EmailField(
         max_length=255,
         required=True,
         error_messages={'required': 'Email address is required.', 'blank': 'Email address cannot be blank.'}
     )
+    code = serializers.CharField(
+        max_length=6,
+        required=True,
+        error_messages={'required': 'Verification code is required.', 'blank': 'Verification code cannot be blank.'}
+    )
 
     def validate(self, attrs):
         email = attrs.get('email').lower()
-        # code = self.context.get('code')
+        code = attrs.get('code')
 
-        if not User.objects.filter(email=email).exists():
-            raise serializers.ValidationError('No account found with this email address.')
+        # Check if email exists
+        attrs['exists'] = User.objects.filter(email=email).exists()
+        
+        # Send OTP only if email exists (for forget password) or doesn't exist (for signup)
+        # Context can be passed via request to differentiate flows, but here we send OTP regardless
+        try:
+            print(code)
+            # send_mail(
+            #     'Your OTP Code',
+            #     f'Your verification code is {code}',
+            #     'from@example.com',
+            #     [email],
+            #     fail_silently=False,
+            # )
+        except Exception as e:
+            raise serializers.ValidationError(f"Failed to send OTP: {str(e)}")
         
         return attrs
-
+    
 class UserResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(
         max_length=255,
