@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
+from decimal import Decimal
 
 class Category(models.Model):
     name = models.CharField(max_length=255)
@@ -74,10 +75,11 @@ class TableField(models.Model):
         ('text', 'Text'),
         ('number', 'Number'),
         ('image', 'Image'),
+        ('price', 'Price'),
     )
     product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='table_fields')
     name = models.CharField(max_length=255)
-    field_type = models.CharField(max_length=20, choices=FIELD_TYPES)
+    field_type = models.CharField(max_length=20, choices=FIELD_TYPES, db_index=True)  # Added db_index
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -126,7 +128,6 @@ class Item(models.Model):
         verbose_name_plural = 'items'
 
     def clean(self):
-        # Validate physical product fields
         if self.is_physical_product:
             if self.weight is None or self.weight <= 0:
                 raise ValidationError("Weight must be provided and greater than 0 for a physical product.")
@@ -136,7 +137,6 @@ class Item(models.Model):
             self.weight = None
             self.weight_unit = None
 
-        # Validate inventory tracking fields
         if self.track_inventory:
             if self.stock is None or self.stock < 0:
                 raise ValidationError("Stock must be provided and non-negative when tracking inventory.")
@@ -147,7 +147,7 @@ class Item(models.Model):
             self.title = None
 
     def save(self, *args, **kwargs):
-        self.full_clean()  # Run validation before saving
+        self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -172,7 +172,7 @@ class ItemData(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='data_entries')
     field = models.ForeignKey(TableField, on_delete=models.CASCADE, related_name='data_values')
     value_text = models.TextField(blank=True, null=True)
-    value_number = models.IntegerField(blank=True, null=True)
+    value_number = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     value_image = models.ImageField(upload_to='item_data_images/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -186,7 +186,6 @@ class ItemData(models.Model):
         verbose_name_plural = 'item data'
 
     def clean(self):
-        # Normalize empty strings to None
         if self.value_text == '':
             self.value_text = None
         if self.value_number == '':
@@ -194,47 +193,60 @@ class ItemData(models.Model):
         if self.value_image == '':
             self.value_image = None
 
-        # Validate based on field_type
         if self.field.field_type == 'text':
             if self.value_text is None:
                 raise ValidationError("A non-empty value_text is required for a text field.")
-            if (self.value_number is not None) or self.value_image:
+            if self.value_number is not None or self.value_image:
                 raise ValidationError("For a text field, only value_text should be provided.")
         elif self.field.field_type == 'number':
             if self.value_number is None:
                 raise ValidationError("A non-empty value_number is required for a number field.")
             if self.value_text is not None or self.value_image:
                 raise ValidationError("For a number field, only value_number should be provided.")
+        elif self.field.field_type == 'price':
+            if self.value_number is None or self.value_number < 0:
+                raise ValidationError("A non-negative value_number is required for a price field.")
+            if self.value_text is not None or self.value_image:
+                raise ValidationError("For a price field, only value_number should be provided.")
         elif self.field.field_type == 'image':
-            if not (self.value_image):
+            if not self.value_image:
                 raise ValidationError("A non-empty value_image is required for an image field.")
             if self.value_text is not None or self.value_number is not None:
                 raise ValidationError("For an image field, only value_image should be provided.")
 
     def save(self, *args, **kwargs):
-        self.full_clean()  # Run validation before saving
+        self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         if self.field.field_type == 'image' and self.value_image:
             return f"{self.item} - {self.field.name}: {self.value_image.url}"
+        elif self.field.field_type == 'price':
+            return f"{self.item} - {self.field.name}: ${self.value_number}"
         return f"{self.item} - {self.field.name}: {self.value_text or self.value_number or '-'}"
-
 
 class UserExclusivePrice(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE)
-    exclusive_price = models.DecimalField(max_digits=10, decimal_places=2)
+    item = models.ForeignKey(Item, on_delete=models.CASCADE)
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, help_text="Discount percentage")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('user', 'product')
+        unique_together = ('user', 'item')
         indexes = [
-            models.Index(fields=['user', 'product']),
+            models.Index(fields=['user', 'item']),
             models.Index(fields=['created_at']),
         ]
         verbose_name = 'user exclusive price'
         verbose_name_plural = 'user exclusive prices'
 
+    def clean(self):
+        if self.discount_percentage < 0 or self.discount_percentage > 100:
+            raise ValidationError("Discount percentage must be between 0 and 100.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f"Exclusive price for {self.user.username} - {self.product.name}"
+        return f"{self.user.email} - {self.item} ({self.discount_percentage}% off)"

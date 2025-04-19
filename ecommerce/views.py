@@ -84,19 +84,24 @@ class ItemViewSet(viewsets.ModelViewSet):
     serializer_class = ItemSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['product_variant']
+    filterset_fields = ['product_variant', 'sku', 'status']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context.update({'request': self.request})
+        return context
+
 class ItemDataViewSet(viewsets.ModelViewSet):
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
     serializer_class = ItemDataSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['item', 'field']
+    filterset_fields = ['item', 'field', 'field__field_type']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -104,11 +109,11 @@ class ItemDataViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
 class UserExclusivePriceViewSet(viewsets.ModelViewSet):
-    queryset = UserExclusivePrice.objects.all().select_related('user', 'product')
+    queryset = UserExclusivePrice.objects.all().select_related('user', 'item__product_variant')
     serializer_class = UserExclusivePriceSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['user', 'product']
+    filterset_fields = ['user', 'item']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

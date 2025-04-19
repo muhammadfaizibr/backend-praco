@@ -108,6 +108,11 @@ class ItemDataSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("A non-empty value_number is required for a number field.")
             if value_text is not None or value_image:
                 raise serializers.ValidationError("For a number field, only value_number should be provided.")
+        elif field.field_type == 'price':
+            if value_number is None or value_number < 0:
+                raise serializers.ValidationError("A non-negative value_number is required for a price field.")
+            if value_text is not None or value_image:
+                raise serializers.ValidationError("For a price field, only value_number should be provided.")
         elif field.field_type == 'image':
             if not value_image:
                 raise serializers.ValidationError("A non-empty value_image is required for an image field.")
@@ -122,4 +127,4 @@ class ItemDataSerializer(serializers.ModelSerializer):
 class UserExclusivePriceSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserExclusivePrice
-        fields = ['id', 'user', 'product', 'exclusive_price', 'created_at']
+        fields = ['id', 'user', 'item', 'discount_percentage', 'created_at']

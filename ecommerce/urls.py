@@ -17,6 +17,6 @@ router.register(r'item-data', ItemDataViewSet)
 router.register(r'user-exclusive-prices', UserExclusivePriceViewSet)
 
 urlpatterns = [
-    path('api/', include(router.urls)),
+    path('', include(router.urls)),
     path('ckeditor/', include('ckeditor_uploader.urls')),
 ]

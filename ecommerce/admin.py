@@ -112,6 +112,8 @@ class ItemDataInline(admin.TabularInline):
     def value_display(self, obj):
         if obj.field and obj.field.field_type == 'image' and obj.value_image:
             return mark_safe(f'<img src="{obj.value_image.url}" width="50" height="50" />')
+        elif obj.field and obj.field.field_type == 'price' and obj.value_number is not None:
+            return f"${obj.value_number:.2f}"  # Display price with 2 decimal places
         return obj.value_text or obj.value_number or '-'
     value_display.short_description = 'Value'
 
@@ -195,12 +197,14 @@ class TableFieldAdmin(admin.ModelAdmin):
 @admin.register(ItemData)
 class ItemDataAdmin(admin.ModelAdmin):
     list_display = ('item', 'field', 'value_display', 'created_at')
-    search_fields = ('item__product_variant__name', 'field__name')
+    search_fields = ('item__sku', 'field__name')
     list_filter = ('item__product_variant', 'field__field_type', 'created_at')
 
     def value_display(self, obj):
         if obj.field.field_type == 'image' and obj.value_image:
             return mark_safe(f'<img src="{obj.value_image.url}" width="50" height="50" />')
+        elif obj.field.field_type == 'price' and obj.value_number is not None:
+            return f"${obj.value_number:.2f}"
         return obj.value_text or obj.value_number or '-'
     value_display.short_description = 'Value'
 
@@ -214,12 +218,13 @@ class ItemDataAdmin(admin.ModelAdmin):
 
 @admin.register(UserExclusivePrice)
 class UserExclusivePriceAdmin(admin.ModelAdmin):
-    list_display = ('user', 'product', 'exclusive_price', 'created_at')
-    search_fields = ('user__username', 'product__name')
-    list_filter = ('user', 'product', 'created_at')
+    list_display = ('user', 'item', 'discount_percentage', 'created_at')
+    search_fields = ('user__email', 'user__first_name', 'item__sku')
+    list_filter = ('user', 'item__product_variant', 'created_at')
+    fields = ('user', 'item', 'discount_percentage')
 
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related('user', 'product')
+        return super().get_queryset(request).select_related('user', 'item__product_variant')
 
     class Media:
         css = {
