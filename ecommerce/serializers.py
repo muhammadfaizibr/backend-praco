@@ -61,8 +61,6 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             'show_units_per', 'created_at', 'pricing_tiers'
         ]
 
-        depth = 1
-
     def validate(self, data):
         show_units_per = data.get('show_units_per')
         if self.instance:
@@ -107,49 +105,11 @@ class ItemImageSerializer(serializers.ModelSerializer):
         model = ItemImage
         fields = ['id', 'item', 'image', 'created_at']
 
-class ItemSerializer(serializers.ModelSerializer):
-    images = ItemImageSerializer(many=True, read_only=True)
-    pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Item
-        fields = [
-            'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
-            'track_inventory', 'stock', 'title', 'status', 'created_at', 'images', 'pricing_tier_data'
-        ]
-
-    def validate(self, data):
-        is_physical_product = data.get('is_physical_product', False)
-        weight = data.get('weight')
-        weight_unit = data.get('weight_unit')
-        track_inventory = data.get('track_inventory', False)
-        stock = data.get('stock')
-        title = data.get('title')
-
-        if is_physical_product:
-            if weight is None or weight <= 0:
-                raise serializers.ValidationError("Weight must be provided and greater than 0 for a physical product.")
-            if not weight_unit:
-                raise serializers.ValidationError("Weight unit must be provided for a physical product.")
-        else:
-            data['weight'] = None
-            data['weight_unit'] = None
-
-        if track_inventory:
-            if stock is None or stock < 0:
-                raise serializers.ValidationError("Stock must be provided and non-negative when tracking inventory.")
-            if not title:
-                raise serializers.ValidationError("Title must be provided when tracking inventory.")
-        else:
-            data['stock'] = None
-            data['title'] = None
-
-        return data
-
 class ItemDataSerializer(serializers.ModelSerializer):
     field_id = serializers.PrimaryKeyRelatedField(
         queryset=TableField.objects.all(), source='field', write_only=True
     )
+    field = TableFieldSerializer(read_only=True)
 
     class Meta:
         model = ItemData
@@ -193,6 +153,47 @@ class ItemDataSerializer(serializers.ModelSerializer):
         data['value_text'] = value_text
         data['value_number'] = value_number
         data['value_image'] = value_image
+        return data
+
+class ItemSerializer(serializers.ModelSerializer):
+    images = ItemImageSerializer(many=True, read_only=True)
+    pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
+    data_entries = ItemDataSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Item
+        fields = [
+            'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
+            'track_inventory', 'stock', 'title', 'status', 'created_at', 'images',
+            'pricing_tier_data', 'data_entries'
+        ]
+
+    def validate(self, data):
+        is_physical_product = data.get('is_physical_product', False)
+        weight = data.get('weight')
+        weight_unit = data.get('weight_unit')
+        track_inventory = data.get('track_inventory', False)
+        stock = data.get('stock')
+        title = data.get('title')
+
+        if is_physical_product:
+            if weight is None or weight <= 0:
+                raise serializers.ValidationError("Weight must be provided and greater than 0 for a physical product.")
+            if not weight_unit:
+                raise serializers.ValidationError("Weight unit must be provided for a physical product.")
+        else:
+            data['weight'] = None
+            data['weight_unit'] = None
+
+        if track_inventory:
+            if stock is None or stock < 0:
+                raise serializers.ValidationError("Stock must be provided and non-negative when tracking inventory.")
+            if not title:
+                raise serializers.ValidationError("Title must be provided when tracking inventory.")
+        else:
+            data['stock'] = None
+            data['title'] = None
+
         return data
 
 class UserExclusivePriceSerializer(serializers.ModelSerializer):

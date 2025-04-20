@@ -247,7 +247,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context.update({'request': self.request})
         return context
-
+    
 class ItemDataViewSet(viewsets.ModelViewSet):
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
     serializer_class = ItemDataSerializer
