@@ -4,7 +4,7 @@ from ecommerce.models import Category, Product, ProductImage, ProductVariant, Pr
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ['id', 'name', 'description', 'image', 'created_at']
+        fields = ['id', 'name', 'slug', 'description', 'image', 'slider_image', 'created_at']
 
 class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
@@ -13,10 +13,11 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
+    category = CategorySerializer(read_only=True)
 
     class Meta:
         model = Product
-        fields = ['id', 'category', 'name', 'description', 'is_new', 'created_at', 'images']
+        fields = ['id', 'category', 'name', 'slug', 'description', 'is_new', 'created_at', 'images']
 
 class PricingTierDataSerializer(serializers.ModelSerializer):
     class Meta:
@@ -59,6 +60,8 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             'id', 'product', 'name', 'units_per_pack', 'units_per_pallet',
             'show_units_per', 'created_at', 'pricing_tiers'
         ]
+
+        depth = 1
 
     def validate(self, data):
         show_units_per = data.get('show_units_per')

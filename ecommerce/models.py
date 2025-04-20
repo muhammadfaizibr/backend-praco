@@ -2,17 +2,20 @@ from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
-from decimal import Decimal
+from django.utils.text import slugify
 
 class Category(models.Model):
     name = models.CharField(max_length=255, unique=True)
+    slug = models.SlugField(max_length=255, unique=True, blank=True, help_text="URL-friendly identifier, auto-generated if blank")
     description = RichTextField(blank=True)
     image = models.ImageField(upload_to='category_images/', blank=True, null=True)
+    slider_image = models.ImageField(upload_to='category_slider_images/', blank=True, null=True, help_text="Optional image for slider display")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['name']),
+            models.Index(fields=['slug']),
             models.Index(fields=['created_at']),
         ]
         verbose_name = 'category'
@@ -23,6 +26,14 @@ class Category(models.Model):
             raise ValidationError("Category name cannot be empty.")
 
     def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            # Ensure slug uniqueness
+            base_slug = self.slug
+            counter = 1
+            while Category.objects.filter(slug=self.slug).exclude(id=self.id).exists():
+                self.slug = f"{base_slug}-{counter}"
+                counter += 1
         self.full_clean()
         super().save(*args, **kwargs)
 
@@ -30,8 +41,9 @@ class Category(models.Model):
         return self.name
 
 class Product(models.Model):
-    category = models.ForeignKey(Category, on_delete=models.CASCADE, related_name='products')
+    category = models.ForeignKey('Category', on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=255, help_text="URL-friendly identifier, auto-generated if blank")
     description = RichTextField()
     is_new = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -51,12 +63,20 @@ class Product(models.Model):
             raise ValidationError("Product description cannot be empty.")
 
     def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            # Ensure slug uniqueness
+            base_slug = self.slug
+            counter = 1
+            while Product.objects.filter(slug=self.slug).exclude(id=self.id).exists():
+                self.slug = f"{base_slug}-{counter}"
+                counter += 1
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.category.name} - {self.name}"
-
+    
 class ProductImage(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='product_images/')

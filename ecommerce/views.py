@@ -1,5 +1,5 @@
 from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework import status
@@ -14,50 +14,82 @@ from ecommerce.serializers import (
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['name']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        search_query = self.request.query_params.get('search', None)
+        slug = self.request.query_params.get('slug', None)
+        if search_query:
+            queryset = queryset.filter(
+                Q(name__icontains=search_query) |
+                Q(slug__icontains=search_query) |
+                Q(description__icontains=search_query)
+            )
+        if slug:
+            queryset = queryset.filter(slug=slug)
+        return queryset
+    
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class ProductImageViewSet(viewsets.ModelViewSet):
     queryset = ProductImage.objects.all()
     serializer_class = ProductImageSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
-
+        return [AllowAny()]
+    
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all().select_related('category').prefetch_related('images')
     serializer_class = ProductSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['category', 'name', 'is_new']
+    filterset_fields = ['name', 'slug', 'is_new']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        category_slug = self.request.query_params.get('category')
+        slug = self.request.query_params.get('slug')
+
+        if category_slug:
+            try:
+                category = Category.objects.get(slug=category_slug)
+                queryset = queryset.filter(category=category)
+            except Category.DoesNotExist:
+                queryset = queryset.none()
+
+        if slug:
+            queryset = queryset.filter(slug=slug)
+
+        return queryset
+    
 class ProductVariantViewSet(viewsets.ModelViewSet):
     queryset = ProductVariant.objects.all().select_related('product').prefetch_related('pricing_tiers__pricing_data')
     serializer_class = ProductVariantSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product', 'name']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
     @action(detail=True, methods=['get'], url_path='calculate-price')
     def calculate_price(self, request, pk=None):
@@ -154,62 +186,62 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
 class PricingTierViewSet(viewsets.ModelViewSet):
     queryset = PricingTier.objects.all().select_related('product_variant').prefetch_related('pricing_data')
     serializer_class = PricingTierSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'tier_type']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class PricingTierDataViewSet(viewsets.ModelViewSet):
     queryset = PricingTierData.objects.all().select_related('item__product_variant', 'pricing_tier')
     serializer_class = PricingTierDataSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item', 'pricing_tier']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class TableFieldViewSet(viewsets.ModelViewSet):
     queryset = TableField.objects.all().select_related('product_variant')
     serializer_class = TableFieldSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'field_type']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class ItemImageViewSet(viewsets.ModelViewSet):
     queryset = ItemImage.objects.all()
     serializer_class = ItemImageSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class ItemViewSet(viewsets.ModelViewSet):
     queryset = Item.objects.all().select_related('product_variant__product').prefetch_related('data_entries__field', 'images', 'pricing_tier_data')
     serializer_class = ItemSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'sku', 'status']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -219,14 +251,14 @@ class ItemViewSet(viewsets.ModelViewSet):
 class ItemDataViewSet(viewsets.ModelViewSet):
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
     serializer_class = ItemDataSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item', 'field', 'field__field_type']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
-        return [IsAuthenticated()]
+        return [AllowAny()]
 
 class UserExclusivePriceViewSet(viewsets.ModelViewSet):
     queryset = UserExclusivePrice.objects.all().select_related('user', 'item__product_variant')

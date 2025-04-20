@@ -23,3 +23,6 @@ urlpatterns = [
     path('', include(router.urls)),
     path('ckeditor/', include('ckeditor_uploader.urls')),
 ]
+
+
+# 

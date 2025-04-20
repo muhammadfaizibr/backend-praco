@@ -1,18 +1,19 @@
 from django.contrib import admin
 from django import forms
-from django.core.exceptions import ValidationError
 from .models import Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData, TableField, Item, ItemImage, ItemData, UserExclusivePrice
 
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'created_at')
-    search_fields = ('name',)
+    list_display = ('name', 'slug', 'created_at')
+    search_fields = ('name', 'slug')
     list_filter = ('created_at',)
     ordering = ('name',)
+    fields = ('name', 'slug', 'description', 'image', 'slider_image')
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
 
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
@@ -24,7 +25,7 @@ class ProductImageInline(admin.TabularInline):
         }
 
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'category', 'is_new', 'created_at')
+    list_display = ('name', 'slug', 'category', 'is_new', 'created_at')
     search_fields = ('name', 'category__name')
     list_filter = ('category', 'is_new', 'created_at')
     ordering = ('name',)
