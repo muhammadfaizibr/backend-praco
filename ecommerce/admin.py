@@ -35,9 +35,36 @@ class ProductAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
+class PricingTierForm(forms.ModelForm):
+    class Meta:
+        model = PricingTier
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        range_start = cleaned_data.get('range_start')
+        range_end = cleaned_data.get('range_end')
+        no_end_range = cleaned_data.get('no_end_range')
+
+        if range_start is None:
+            raise forms.ValidationError("Range start is required and must be a positive integer.")
+        if range_start <= 0:
+            raise forms.ValidationError("Range start must be greater than 0.")
+        if no_end_range:
+            if range_end is not None:
+                raise forms.ValidationError("Range end must be blank when 'No End Range' is checked.")
+        else:
+            if range_end is None:
+                raise forms.ValidationError("Range end is required when 'No End Range' is not checked.")
+            if range_end < range_start:
+                raise forms.ValidationError("Range end must be greater than or equal to range start.")
+
+        return cleaned_data
+
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 1
+    form = PricingTierForm
 
     class Media:
         css = {
@@ -72,41 +99,86 @@ class ProductVariantForm(forms.ModelForm):
         cleaned_data = super().clean()
         show_units_per = cleaned_data.get('show_units_per')
 
-        # Access the PricingTier inline formset data from self.data
         tier_types = []
+        valid_tiers = []
         total_forms = int(self.data.get('pricing_tiers-TOTAL_FORMS', 0))
         for i in range(total_forms):
-            if f'pricing_tiers-{i}-DELETE' in self.data:
+            if f'pricing_tiers-{i}-DELETE' in self.data and self.data[f'pricing_tiers-{i}-DELETE'] == 'on':
                 continue
             tier_type = self.data.get(f'pricing_tiers-{i}-tier_type')
-            if tier_type:
-                tier_types.append(tier_type)
+            range_start = self.data.get(f'pricing_tiers-{i}-range_start')
+            range_end = self.data.get(f'pricing_tiers-{i}-range_end')
+            no_end_range = self.data.get(f'pricing_tiers-{i}-no_end_range') == 'on'
 
-        # Validate PricingTiers
-        if not tier_types:
-            raise forms.ValidationError("At least one Pricing Tier is required for a Product Variant.")
+            if not tier_type or not range_start:
+                continue
 
-        pack_tiers = 'pack' in tier_types
-        pallet_tiers = 'pallet' in tier_types
+            try:
+                range_start = int(range_start)
+                if range_start <= 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                raise forms.ValidationError(
+                    f"Pricing tier {i+1}: Range start must be a positive integer."
+                )
+
+            if not no_end_range and range_end:
+                try:
+                    range_end = int(range_end)
+                    if range_end < range_start:
+                        raise forms.ValidationError(
+                            f"Pricing tier {i+1}: Range end must be greater than or equal to range start."
+                        )
+                except (ValueError, TypeError):
+                    raise forms.ValidationError(
+                        f"Pricing tier {i+1}: Range end must be a valid integer."
+                    )
+            elif not no_end_range and not range_end:
+                raise forms.ValidationError(
+                    f"Pricing tier {i+1}: Range end is required when 'No End Range' is not checked."
+                )
+            elif no_end_range and range_end:
+                raise forms.ValidationError(
+                    f"Pricing tier {i+1}: Range end must be blank when 'No End Range' is checked."
+                )
+
+            tier_types.append(tier_type)
+            valid_tiers.append({
+                'tier_type': tier_type,
+                'range_start': range_start,
+                'range_end': None if no_end_range else range_end,
+                'no_end_range': no_end_range
+            })
+
+        if not valid_tiers:
+            raise forms.ValidationError("At least one valid Pricing Tier is required for a Product Variant.")
+
+        pack_tiers = [tier for tier in valid_tiers if tier['tier_type'] == 'pack']
+        pallet_tiers = [tier for tier in valid_tiers if tier['tier_type'] == 'pallet']
 
         if show_units_per == 'pack':
             if not pack_tiers:
-                raise forms.ValidationError("A 'pack' Pricing Tier is required when show_units_per is 'pack'.")
+                raise forms.ValidationError("At least one 'pack' Pricing Tier is required when show_units_per is 'pack'.")
             if pallet_tiers:
-                raise forms.ValidationError("A 'pallet' Pricing Tier is not allowed when show_units_per is 'pack'.")
+                raise forms.ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
+            pack_no_end = [tier for tier in pack_tiers if tier['no_end_range']]
+            if len(pack_no_end) != 1:
+                raise forms.ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked when show_units_per is 'pack'.")
         elif show_units_per == 'pallet':
             if not pallet_tiers:
-                raise forms.ValidationError("A 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
+                raise forms.ValidationError("At least one 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
             if pack_tiers:
-                raise forms.ValidationError("A 'pack' Pricing Tier is not allowed when show_units_per is 'pallet'.")
+                raise forms.ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
+            pallet_no_end = [tier for tier in pallet_tiers if tier['no_end_range']]
+            if len(pallet_no_end) != 1:
+                raise forms.ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'pallet'.")
         elif show_units_per == 'both':
-            errors = []
-            if not pack_tiers:
-                errors.append("A 'pack' Pricing Tier is required when show_units_per is 'both'.")
-            if not pallet_tiers:
-                errors.append("A 'pallet' Pricing Tier is required when show_units_per is 'both'.")
-            if errors:
-                raise forms.ValidationError(errors)
+            if not pack_tiers or not pallet_tiers:
+                raise forms.ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required when show_units_per is 'both'.")
+            pack_no_end = [tier for tier in pack_tiers if tier['no_end_range']]
+            pallet_no_end = [tier for tier in pallet_tiers if tier['no_end_range']]
+            if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
+                raise forms.ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'both'.")
 
         return cleaned_data
 
@@ -117,12 +189,12 @@ class ProductVariantAdmin(admin.ModelAdmin):
     ordering = ('name',)
     inlines = [PricingTierInline, TableFieldInline]
     form = ProductVariantForm
-
-    # Enable autocomplete search for ProductVariant
-    search_fields = ['name', 'product__name']  # Fields to search in autocomplete
+    search_fields = ['name', 'product__name']
 
     def save_related(self, request, form, formsets, change):
         super().save_related(request, form, formsets, change)
+        obj = form.instance
+        obj.validate_pricing_tiers()
 
     class Media:
         css = {
@@ -134,9 +206,7 @@ class PricingTierDataInline(admin.TabularInline):
     extra = 1
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        # Filter pricing_tier based on the selected product_variant
         if db_field.name == 'pricing_tier':
-            # Get the Item instance being edited (if editing an existing Item)
             item_id = request.resolver_match.kwargs.get('object_id')
             if item_id:
                 item = Item.objects.get(pk=item_id)
@@ -164,7 +234,6 @@ class ItemDataInline(admin.TabularInline):
     extra = 1
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        # Filter field based on the selected product_variant
         if db_field.name == 'field':
             item_id = request.resolver_match.kwargs.get('object_id')
             if item_id:
@@ -185,8 +254,6 @@ class ItemAdmin(admin.ModelAdmin):
     list_filter = ('product_variant', 'is_physical_product', 'status', 'created_at')
     ordering = ('sku',)
     inlines = [PricingTierDataInline, ItemImageInline, ItemDataInline]
-
-    # Enable autocomplete for product_variant
     autocomplete_fields = ['product_variant']
 
     class Media:

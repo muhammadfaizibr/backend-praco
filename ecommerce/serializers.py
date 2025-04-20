@@ -28,7 +28,27 @@ class PricingTierSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PricingTier
-        fields = ['id', 'product_variant', 'tier_type', 'range_start', 'range_end', 'created_at', 'pricing_data']
+        fields = ['id', 'product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'pricing_data']
+
+    def validate(self, data):
+        tier_type = data.get('tier_type')
+        no_end_range = data.get('no_end_range')
+        range_end = data.get('range_end')
+        product_variant = data.get('product_variant')
+
+        if no_end_range and range_end is not None:
+            raise serializers.ValidationError("Range end must be null when 'No End Range' is checked.")
+        if not no_end_range and range_end is None:
+            raise serializers.ValidationError("Range end is required when 'No End Range' is not checked.")
+
+        if product_variant:
+            show_units_per = product_variant.show_units_per
+            if show_units_per == 'pack' and tier_type != 'pack':
+                raise serializers.ValidationError("When show_units_per is 'pack', tier_type must be 'pack'.")
+            if show_units_per == 'pallet' and tier_type != 'pallet':
+                raise serializers.ValidationError("When show_units_per is 'pallet', tier_type must be 'pallet'.")
+
+        return data
 
 class ProductVariantSerializer(serializers.ModelSerializer):
     pricing_tiers = PricingTierSerializer(many=True, read_only=True)
@@ -39,6 +59,35 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             'id', 'product', 'name', 'units_per_pack', 'units_per_pallet',
             'show_units_per', 'created_at', 'pricing_tiers'
         ]
+
+    def validate(self, data):
+        show_units_per = data.get('show_units_per')
+        if self.instance:
+            pricing_tiers = self.instance.pricing_tiers.all()
+            pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
+            pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
+
+            if show_units_per == 'pack':
+                if pallet_tiers:
+                    raise serializers.ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
+                pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+                if len(pack_no_end) != 1:
+                    raise serializers.ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked.")
+            elif show_units_per == 'pallet':
+                if pack_tiers:
+                    raise serializers.ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
+                pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
+                if len(pallet_no_end) != 1:
+                    raise serializers.ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked.")
+            elif show_units_per == 'both':
+                if not pack_tiers or not pallet_tiers:
+                    raise serializers.ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required.")
+                pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+                pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
+                if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
+                    raise serializers.ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked.")
+
+        return data
 
 class TableFieldSerializer(serializers.ModelSerializer):
     class Meta:

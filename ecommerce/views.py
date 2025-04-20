@@ -63,11 +63,12 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
     def calculate_price(self, request, pk=None):
         product_variant = self.get_object()
         units = int(request.query_params.get('units', 0))
-        price_per = request.query_params.get('price_per', 'pack')
+        price_per = request.query_params.get('price_per', 'pack')  # 'pack' or 'unit'
 
         if units <= 0:
             return Response({"error": "Units must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Determine the number of packs or pallets based on show_units_per
         units_per_pack = product_variant.units_per_pack
         units_per_pallet = product_variant.units_per_pallet
         show_units_per = product_variant.show_units_per
@@ -85,6 +86,9 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             if remaining_units > 0:
                 pallets += 1
 
+        # Since price_per_pack and price_per_unit are removed, we need to find an Item associated with this ProductVariant
+        # For simplicity, we'll assume we're calculating for the first Item associated with this ProductVariant
+        # In a real application, you might want to pass an item_id as a query parameter
         try:
             item = product_variant.items.first()
             if not item:
@@ -92,6 +96,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
         except Item.DoesNotExist:
             return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Determine the applicable pricing tier and price from PricingTierData
         total = 0
         if show_units_per in ['pack', 'both'] and price_per == 'pack':
             tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
@@ -122,6 +127,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         else:
+            # Price per unit calculation requires deriving the unit price from the pack price
             tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
@@ -132,6 +138,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             if applicable_tier:
                 try:
                     pricing_data = PricingTierData.objects.get(item=item, pricing_tier=applicable_tier)
+                    # Derive price per unit: price per pack / units per pack
                     price_per_unit = pricing_data.price / units_per_pack
                     total = units * price_per_unit
                 except PricingTierData.DoesNotExist:
@@ -141,7 +148,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             'units': units,
             'packs': packs,
             'pallets': pallets,
-            'total': float(total)
+            'total': float(total)  # Convert Decimal to float for JSON serialization
         })
 
 class PricingTierViewSet(viewsets.ModelViewSet):

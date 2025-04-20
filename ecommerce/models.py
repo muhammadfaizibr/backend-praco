@@ -3,8 +3,6 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
 from decimal import Decimal
-from django.db.models.signals import post_save
-from django.dispatch import receiver
 
 class Category(models.Model):
     name = models.CharField(max_length=255, unique=True)
@@ -112,30 +110,50 @@ class ProductVariant(models.Model):
         if self.units_per_pallet <= 0:
             raise ValidationError("Units per pallet must be greater than 0.")
 
-    def create_default_table_fields(self):
-        default_fields = [
-            {'name': 'title', 'field_type': 'text'},
-            {'name': 'status', 'field_type': 'text'},
-            {'name': 'is_physical_product', 'field_type': 'text'},
-            {'name': 'weight', 'field_type': 'number'},
-            {'name': 'weight_unit', 'field_type': 'text'},
-            {'name': 'track_inventory', 'field_type': 'text'},
-            {'name': 'stock', 'field_type': 'number'},
-            {'name': 'sku', 'field_type': 'text'},
-            {'name': 'image', 'field_type': 'image'},
-        ]
-        for field in default_fields:
-            if not TableField.objects.filter(product_variant=self, name=field['name']).exists():
-                TableField.objects.create(
-                    product_variant=self,
-                    name=field['name'],
-                    field_type=field['field_type']
-                )
+    def validate_pricing_tiers(self):
+        pricing_tiers = self.pricing_tiers.all() if self.pk else []
+        if not pricing_tiers:
+            raise ValidationError("At least one Pricing Tier is required for a Product Variant.")
+
+        pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
+        pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
+
+        if self.show_units_per == 'pack':
+            if not pack_tiers:
+                raise ValidationError("At least one 'pack' Pricing Tier is required when show_units_per is 'pack'.")
+            if pallet_tiers:
+                raise ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
+            pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+            if len(pack_no_end) != 1:
+                raise ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked when show_units_per is 'pack'.")
+            for tier in pack_tiers:
+                if not tier.no_end_range and tier.range_end is None:
+                    raise ValidationError("Non-'No End Range' pack tiers must have a defined range_end.")
+        elif self.show_units_per == 'pallet':
+            if not pallet_tiers:
+                raise ValidationError("At least one 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
+            if pack_tiers:
+                raise ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
+            pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
+            if len(pallet_no_end) != 1:
+                raise ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'pallet'.")
+            for tier in pallet_tiers:
+                if not tier.no_end_range and tier.range_end is None:
+                    raise ValidationError("Non-'No End Range' pallet tiers must have a defined range_end.")
+        elif self.show_units_per == 'both':
+            if not pack_tiers or not pallet_tiers:
+                raise ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required when show_units_per is 'both'.")
+            pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+            pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
+            if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
+                raise ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'both'.")
+            for tier in pack_tiers + pallet_tiers:
+                if not tier.no_end_range and tier.range_end is None:
+                    raise ValidationError("Non-'No End Range' tiers must have a defined range_end.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
-        self.create_default_table_fields()
 
     def __str__(self):
         return f"{self.product.name} - {self.name}"
@@ -149,7 +167,8 @@ class PricingTier(models.Model):
     product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='pricing_tiers')
     tier_type = models.CharField(max_length=10, choices=TIER_TYPES)
     range_start = models.PositiveIntegerField()
-    range_end = models.PositiveIntegerField(null=True, blank=True, help_text="Leave blank for 'X+' ranges")
+    range_end = models.PositiveIntegerField(null=True, blank=True, help_text="Leave blank if 'No End Range' is checked")
+    no_end_range = models.BooleanField(default=False, help_text="Check if this tier has no end range (e.g., X+)")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -161,32 +180,44 @@ class PricingTier(models.Model):
         verbose_name_plural = 'pricing tiers'
 
     def clean(self):
+        if self.range_start is None:
+            raise ValidationError("Range start cannot be None.")
         if self.range_start <= 0:
             raise ValidationError("Range start must be greater than 0.")
-        if self.range_end is not None and self.range_end < self.range_start:
-            raise ValidationError("Range end must be greater than or equal to range start.")
+        if self.no_end_range:
+            if self.range_end is not None:
+                raise ValidationError("Range end must be blank when 'No End Range' is checked.")
+        else:
+            if self.range_end is None:
+                raise ValidationError("Range end is required when 'No End Range' is not checked.")
+            if self.range_end < self.range_start:
+                raise ValidationError("Range end must be greater than or equal to range start.")
 
         if not self.product_variant or not self.product_variant.pk:
             return
 
-        # Check for overlapping ranges only among PricingTiers with the same tier_type
         existing_tiers = PricingTier.objects.filter(
             product_variant=self.product_variant,
             tier_type=self.tier_type
         ).exclude(id=self.id)
 
         for tier in existing_tiers:
-            current_end = self.range_end if self.range_end is not None else float('inf')
-            tier_end = tier.range_end if tier.range_end is not None else float('inf')
+            current_end = float('inf') if self.no_end_range else (self.range_end or float('inf'))
+            tier_end = float('inf') if tier.no_end_range else (tier.range_end or float('inf'))
+            if tier.range_start is None:
+                raise ValidationError("Invalid range data in existing tier.")
             if self.range_start <= tier_end and current_end >= tier.range_start:
-                raise ValidationError(f"Range {self.range_start}-{self.range_end or '+'} overlaps with existing range {tier.range_start}-{tier.range_end or '+'} for {self.tier_type}.")
+                raise ValidationError(
+                    f"Range {self.range_start}-{self.range_end or '+'} overlaps with existing range "
+                    f"{tier.range_start}-{tier.range_end or '+'} for {self.tier_type}."
+                )
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
-        range_str = f"{self.range_start}-{self.range_end}" if self.range_end else f"{self.range_start}+"
+        range_str = f"{self.range_start}-" + ("+" if self.no_end_range else str(self.range_end))
         return f"{self.product_variant} - {self.tier_type} - {range_str}"
 
 class PricingTierData(models.Model):
@@ -244,6 +275,7 @@ class TableField(models.Model):
         verbose_name_plural = 'table fields'
 
     def clean(self):
+        print("self.name.lower()", self.name.lower())
         if self.name.lower() in self.RESERVED_NAMES:
             if self.id is None:
                 existing_field = TableField.objects.filter(product_variant=self.product_variant, name=self.name).exists()
@@ -400,7 +432,6 @@ class ItemData(models.Model):
         elif self.field.field_type == 'price':
             return f"{self.item} - {self.field.name}: ${self.value_number}"
         return f"{self.item} - {self.field.name}: {self.value_text or self.value_number or '-'}"
-
 
 class UserExclusivePrice(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
