@@ -27,12 +27,11 @@ urlpatterns = [
 
 # search / adavance search
 # cart
-# navbar
 # excusive pricing
+
 # ui fixes
 # test apis
 
-
 # tracking
-# checkout
+# checkout / shipping
 # email sending
