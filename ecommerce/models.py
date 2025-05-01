@@ -4,8 +4,14 @@ from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
 from django.utils.text import slugify
 from django.core.validators import MinValueValidator
+from decimal import Decimal, ROUND_HALF_UP
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 
 class Category(models.Model):
+    """
+    Represents a product category with a name, slug, description, and images.
+    """
     name = models.CharField(max_length=255, unique=True)
     slug = models.SlugField(max_length=255, unique=True, blank=True, help_text="URL-friendly identifier, auto-generated if blank")
     description = RichTextField(blank=True)
@@ -24,12 +30,11 @@ class Category(models.Model):
 
     def clean(self):
         if not self.name:
-            raise ValidationError("Category name cannot be empty.")
+            raise ValidationError("Please provide a name for the category.")
 
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
-            # Ensure slug uniqueness
             base_slug = self.slug
             counter = 1
             while Category.objects.filter(slug=self.slug).exclude(id=self.id).exists():
@@ -42,9 +47,12 @@ class Category(models.Model):
         return self.name
 
 class Product(models.Model):
+    """
+    Represents a product within a category, with a name, description, and images.
+    """
     category = models.ForeignKey('Category', on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
-    slug = models.SlugField(max_length=255, help_text="URL-friendly identifier, auto-generated if blank")
+    slug = models.SlugField(max_length=255, blank=True, help_text="URL-friendly identifier, auto-generated if blank")
     description = RichTextField()
     is_new = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -59,14 +67,15 @@ class Product(models.Model):
 
     def clean(self):
         if not self.name:
-            raise ValidationError("Product name cannot be empty.")
+            raise ValidationError("Please provide a name for the product.")
         if not self.description:
-            raise ValidationError("Product description cannot be empty.")
+            raise ValidationError("Please provide a description for the product.")
+        if not self.category:
+            raise ValidationError("Please select a category for the product.")
 
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
-            # Ensure slug uniqueness
             base_slug = self.slug
             counter = 1
             while Product.objects.filter(slug=self.slug).exclude(id=self.id).exists():
@@ -77,8 +86,11 @@ class Product(models.Model):
 
     def __str__(self):
         return f"{self.category.name} - {self.name}"
-    
+
 class ProductImage(models.Model):
+    """
+    Stores images associated with a product.
+    """
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='product_images/')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -92,7 +104,7 @@ class ProductImage(models.Model):
 
     def clean(self):
         if not self.image:
-            raise ValidationError("Product image cannot be empty.")
+            raise ValidationError("Please upload an image for the product.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -102,6 +114,9 @@ class ProductImage(models.Model):
         return f"Image for {self.product.name}"
 
 class ProductVariant(models.Model):
+    """
+    Represents a variant of a product with specific attributes like pack/pallet units.
+    """
     SHOW_UNITS_PER_CHOICES = (
         ('pack', 'Pack Only'),
         ('pallet', 'Pallet Only'),
@@ -125,61 +140,66 @@ class ProductVariant(models.Model):
 
     def clean(self):
         if not self.name:
-            raise ValidationError("Product variant name cannot be empty.")
+            raise ValidationError("Please provide a name for the product variant.")
         if self.units_per_pack <= 0:
-            raise ValidationError("Units per pack must be greater than 0.")
+            raise ValidationError("Please provide a positive number for units per pack.")
         if self.units_per_pallet <= 0:
-            raise ValidationError("Units per pallet must be greater than 0.")
+            raise ValidationError("Please provide a positive number for units per pallet.")
+        if not self.product:
+            raise ValidationError("Please select a product for the variant.")
 
     def validate_pricing_tiers(self):
         pricing_tiers = self.pricing_tiers.all() if self.pk else []
         if not pricing_tiers:
-            raise ValidationError("At least one Pricing Tier is required for a Product Variant.")
+            raise ValidationError("Please add at least one pricing tier for this product variant.")
 
         pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
         pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
 
         if self.show_units_per == 'pack':
             if not pack_tiers:
-                raise ValidationError("At least one 'pack' Pricing Tier is required when show_units_per is 'pack'.")
+                raise ValidationError("Please add at least one 'pack' pricing tier when 'Show Units Per' is set to 'Pack Only'.")
             if pallet_tiers:
-                raise ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
+                raise ValidationError("Pallet pricing tiers are not allowed when 'Show Units Per' is set to 'Pack Only'.")
             pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
             if len(pack_no_end) != 1:
-                raise ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked when show_units_per is 'pack'.")
+                raise ValidationError("Please ensure exactly one 'pack' pricing tier has 'No End Range' checked.")
             for tier in pack_tiers:
                 if not tier.no_end_range and tier.range_end is None:
-                    raise ValidationError("Non-'No End Range' pack tiers must have a defined range_end.")
+                    raise ValidationError("Please specify a range end for non-'No End Range' pack tiers.")
         elif self.show_units_per == 'pallet':
             if not pallet_tiers:
-                raise ValidationError("At least one 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
+                raise ValidationError("Please add at least one 'pallet' pricing tier when 'Show Units Per' is set to 'Pallet Only'.")
             if pack_tiers:
-                raise ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
+                raise ValidationError("Pack pricing tiers are not allowed when 'Show Units Per' is set to 'Pallet Only'.")
             pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
             if len(pallet_no_end) != 1:
-                raise ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'pallet'.")
+                raise ValidationError("Please ensure exactly one 'pallet' pricing tier has 'No End Range' checked.")
             for tier in pallet_tiers:
                 if not tier.no_end_range and tier.range_end is None:
-                    raise ValidationError("Non-'No End Range' pallet tiers must have a defined range_end.")
+                    raise ValidationError("Please specify a range end for non-'No End Range' pallet tiers.")
         elif self.show_units_per == 'both':
-            if not pack_tiers or not pallet_tiers:
-                raise ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required when show_units_per is 'both'.")
+            if not pack_tiers:
+                raise ValidationError("Please add at least one 'pack' pricing tier when 'Show Units Per' is set to 'Both Pack and Pallet'.")
+            if not pallet_tiers:
+                raise ValidationError("Please add at least one 'pallet' pricing tier when 'Show Units Per' is set to 'Both Pack and Pallet'.")
             pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
             pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
             if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
-                raise ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'both'.")
-            for tier in pack_tiers + pallet_tiers:
-                if not tier.no_end_range and tier.range_end is None:
-                    raise ValidationError("Non-'No End Range' tiers must have a defined range_end.")
+                raise ValidationError("Please ensure exactly one 'pack' and one 'pallet' pricing tier have 'No End Range' checked.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+        self.validate_pricing_tiers()
 
     def __str__(self):
         return f"{self.product.name} - {self.name}"
 
 class PricingTier(models.Model):
+    """
+    Defines pricing tiers for product variants based on quantity ranges and type (pack/pallet).
+    """
     TIER_TYPES = (
         ('pack', 'Pack'),
         ('pallet', 'Pallet'),
@@ -201,36 +221,38 @@ class PricingTier(models.Model):
         verbose_name_plural = 'pricing tiers'
 
     def clean(self):
-        if self.range_start is None:
-            raise ValidationError("Range start cannot be None.")
-        if self.range_start <= 0:
-            raise ValidationError("Range start must be greater than 0.")
-        if self.no_end_range:
-            if self.range_end is not None:
-                raise ValidationError("Range end must be blank when 'No End Range' is checked.")
-        else:
-            if self.range_end is None:
-                raise ValidationError("Range end is required when 'No End Range' is not checked.")
-            if self.range_end < self.range_start:
-                raise ValidationError("Range end must be greater than or equal to range start.")
+        if self.range_start is None or self.range_start <= 0:
+            raise ValidationError("Please provide a positive number for the range start.")
+        if self.no_end_range and self.range_end is not None:
+            raise ValidationError("Please leave the range end blank when 'No End Range' is checked.")
+        if not self.no_end_range and self.range_end is None:
+            raise ValidationError("Please provide a range end when 'No End Range' is not checked.")
+        if not self.no_end_range and self.range_end <= self.range_start:
+            raise ValidationError("The range end must be greater than the range start.")
+        if not self.product_variant:
+            raise ValidationError("Please select a product variant for this pricing tier.")
 
-        if not self.product_variant or not self.product_variant.pk:
-            return
+        # Check for pack tier if creating a pallet tier
+        if self.tier_type == 'pallet' and self.product_variant and self.product_variant.show_units_per != 'pallet':
+            existing_pack_tiers = PricingTier.objects.filter(
+                product_variant=self.product_variant,
+                tier_type='pack'
+            ).exclude(id=self.id)
+            if not existing_pack_tiers.exists():
+                raise ValidationError("You must create at least one 'pack' pricing tier before adding a 'pallet' pricing tier, unless 'Show Units Per' is set to 'Pallet Only'.")
 
+        # Check for overlapping ranges
         existing_tiers = PricingTier.objects.filter(
             product_variant=self.product_variant,
             tier_type=self.tier_type
         ).exclude(id=self.id)
-
         for tier in existing_tiers:
-            current_end = float('inf') if self.no_end_range else (self.range_end or float('inf'))
-            tier_end = float('inf') if tier.no_end_range else (tier.range_end or float('inf'))
-            if tier.range_start is None:
-                raise ValidationError("Invalid range data in existing tier.")
+            current_end = float('inf') if self.no_end_range else self.range_end
+            tier_end = float('inf') if tier.no_end_range else tier.range_end
             if self.range_start <= tier_end and current_end >= tier.range_start:
                 raise ValidationError(
-                    f"Range {self.range_start}-{self.range_end or '+'} overlaps with existing range "
-                    f"{tier.range_start}-{tier.range_end or '+'} for {self.tier_type}."
+                    f"The range {self.range_start}-{'+' if self.no_end_range else self.range_end} overlaps with "
+                    f"existing range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} for {self.tier_type}."
                 )
 
     def save(self, *args, **kwargs):
@@ -242,6 +264,9 @@ class PricingTier(models.Model):
         return f"{self.product_variant} - {self.tier_type} - {range_str}"
 
 class PricingTierData(models.Model):
+    """
+    Stores pricing data for an item within a pricing tier.
+    """
     item = models.ForeignKey('Item', on_delete=models.CASCADE, related_name='pricing_tier_data')
     pricing_tier = models.ForeignKey(PricingTier, on_delete=models.CASCADE, related_name='pricing_data')
     price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price per pack if tier_type is 'pack', per pallet if 'pallet'")
@@ -257,10 +282,14 @@ class PricingTierData(models.Model):
         verbose_name_plural = 'pricing tier data'
 
     def clean(self):
-        if self.price <= 0:
-            raise ValidationError("Price must be greater than 0.")
+        if self.price is None or self.price <= 0:
+            raise ValidationError("Please provide a positive price.")
         if self.pricing_tier.product_variant != self.item.product_variant:
-            raise ValidationError("Pricing tier must belong to the same product variant as the item.")
+            raise ValidationError("The pricing tier must belong to the same product variant as the item.")
+        if not self.item:
+            raise ValidationError("Please select an item for this pricing data.")
+        if not self.pricing_tier:
+            raise ValidationError("Please select a pricing tier for this pricing data.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -270,6 +299,9 @@ class PricingTierData(models.Model):
         return f"{self.item} - {self.pricing_tier} - Price: {self.price}"
 
 class TableField(models.Model):
+    """
+    Defines custom fields for product variants to store additional item data.
+    """
     FIELD_TYPES = (
         ('text', 'Text'),
         ('number', 'Number'),
@@ -284,6 +316,7 @@ class TableField(models.Model):
     product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='table_fields')
     name = models.CharField(max_length=255)
     field_type = models.CharField(max_length=20, choices=FIELD_TYPES, db_index=True)
+    long_field = models.BooleanField(default=False, help_text="Check if this field requires more display space (e.g., for long text)")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -296,25 +329,26 @@ class TableField(models.Model):
         verbose_name_plural = 'table fields'
 
     def clean(self):
-        print("self.name.lower()", self.name.lower())
+        if not self.name:
+            raise ValidationError("Please provide a name for the table field.")
+        if not self.field_type:
+            raise ValidationError("Please select a field type for the table field.")
+        if not self.product_variant:
+            raise ValidationError("Please select a product variant for the table field.")
         if self.name.lower() in self.RESERVED_NAMES:
-            if self.id is None:
-                existing_field = TableField.objects.filter(product_variant=self.product_variant, name=self.name).exists()
-                if existing_field:
-                    raise ValidationError(f"Field name '{self.name}' is reserved and cannot be used.")
-            else:
-                original = TableField.objects.get(id=self.id)
-                if original.name != self.name:
-                    raise ValidationError(f"Field name '{self.name}' is reserved and cannot be used.")
+            raise ValidationError(f"The field name '{self.name}' is reserved and cannot be used.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.product_variant.name} - {self.name} ({self.field_type})"
+        return f"{self.product_variant.name} - {self.name} ({self.field_type}, {'Long' if self.long_field else 'Short'})"
 
 class Item(models.Model):
+    """
+    Represents a specific item within a product variant with attributes like SKU, stock, and dimensions.
+    """
     STATUS_CHOICES = (
         ('draft', 'Draft'),
         ('active', 'Active'),
@@ -358,46 +392,57 @@ class Item(models.Model):
         verbose_name_plural = 'items'
 
     def clean(self):
-        # Existing validations
         if not self.sku:
-            raise ValidationError("SKU cannot be empty.")
+            raise ValidationError("Please provide a SKU for the item.")
+        if not self.product_variant:
+            raise ValidationError("Please select a product variant for the item.")
         if self.is_physical_product:
             if self.weight is None or self.weight <= 0:
-                raise ValidationError("Weight must be provided and greater than 0 for a physical product.")
+                raise ValidationError("Please provide a positive weight for a physical product.")
             if not self.weight_unit:
-                raise ValidationError("Weight unit must be provided for a physical product.")
+                raise ValidationError("Please select a weight unit for a physical product.")
         else:
             self.weight = None
             self.weight_unit = None
         if self.track_inventory:
             if self.stock is None or self.stock < 0:
-                raise ValidationError("Stock must be provided and non-negative when tracking inventory.")
+                raise ValidationError("Please provide a non-negative stock quantity when tracking inventory.")
             if not self.title:
-                raise ValidationError("Title must be provided when tracking inventory.")
+                raise ValidationError("Please provide a title when tracking inventory.")
         else:
             self.stock = None
             self.title = None
 
-        # Category-based validation
+        # Category-based validation for dimensions
         category_name = self.product_variant.product.category.name.lower() if self.product_variant and self.product_variant.product and self.product_variant.product.category else ''
         required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
-
         if category_name in required_categories:
             if self.height is None or self.height <= 0:
-                raise ValidationError("Height must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+                raise ValidationError("Please provide a positive height for items in categories: box, boxes, postal, postals, bag, bags.")
             if self.width is None or self.width <= 0:
-                raise ValidationError("Width must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+                raise ValidationError("Please provide a positive width for items in categories: box, boxes, postal, postals, bag, bags.")
             if self.length is None or self.length <= 0:
-                raise ValidationError("Length must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+                raise ValidationError("Please provide a positive length for items in categories: box, boxes, postal, postals, bag, bags.")
             if not self.measurement_unit:
-                raise ValidationError("Measurement unit must be provided for items in categories: box, boxes, postal, postals, bag, bags.")
+                raise ValidationError("Please select a measurement unit for items in categories: box, boxes, postal, postals, bag, bags.")
             if self.measurement_unit not in ['MM', 'CM', 'IN', 'M']:
-                raise ValidationError("Measurement unit must be one of: MM, CM, IN, M.")
+                raise ValidationError("Please select a valid measurement unit (MM, CM, IN, M).")
         else:
             self.height = None
             self.width = None
             self.length = None
             self.measurement_unit = None
+
+        # Validate PricingTierData entries
+        if self.pk:  # Only validate if item is being saved/updated
+            pricing_tiers = self.product_variant.pricing_tiers.all()
+            existing_pricing_data = set(self.pricing_tier_data.values_list('pricing_tier_id', flat=True))
+            missing_tiers = [tier for tier in pricing_tiers if tier.id not in existing_pricing_data]
+            if missing_tiers:
+                missing_tier_names = [f"{tier.tier_type} ({tier.range_start}-{'+' if tier.no_end_range else tier.range_end})" for tier in missing_tiers]
+                raise ValidationError(
+                    f"Please provide pricing data for the following pricing tiers: {', '.join(missing_tier_names)}."
+                )
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -405,8 +450,11 @@ class Item(models.Model):
 
     def __str__(self):
         return f"Item {self.sku} for {self.product_variant.name} ({self.status})"
-    
+
 class ItemImage(models.Model):
+    """
+    Stores images associated with an item.
+    """
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='item_images/')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -420,7 +468,9 @@ class ItemImage(models.Model):
 
     def clean(self):
         if not self.image:
-            raise ValidationError("Item image cannot be empty.")
+            raise ValidationError("Please upload an image for the item.")
+        if not self.item:
+            raise ValidationError("Please select an item for this image.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -430,6 +480,9 @@ class ItemImage(models.Model):
         return f"Image for {self.item}"
 
 class ItemData(models.Model):
+    """
+    Stores additional data for an item based on table fields (e.g., text, number, image, price).
+    """
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='data_entries')
     field = models.ForeignKey(TableField, on_delete=models.CASCADE, related_name='data_values')
     value_text = models.TextField(blank=True, null=True)
@@ -447,6 +500,11 @@ class ItemData(models.Model):
         verbose_name_plural = 'item data'
 
     def clean(self):
+        if not self.field:
+            raise ValidationError("Please select a table field for this item data.")
+        if not self.item:
+            raise ValidationError("Please select an item for this item data.")
+
         if self.value_text == '':
             self.value_text = None
         if self.value_number == '':
@@ -456,24 +514,24 @@ class ItemData(models.Model):
 
         if self.field.field_type == 'text':
             if self.value_text is None:
-                raise ValidationError("A non-empty value_text is required for a text field.")
+                raise ValidationError(f"Please provide a value for the text field '{self.field.name}'.")
             if self.value_number is not None or self.value_image:
-                raise ValidationError("For a text field, only value_text should be provided.")
+                raise ValidationError(f"The field '{self.field.name}' only accepts text values.")
         elif self.field.field_type == 'number':
             if self.value_number is None:
-                raise ValidationError("A non-empty value_number is required for a number field.")
+                raise ValidationError(f"Please provide a number for the field '{self.field.name}'.")
             if self.value_text is not None or self.value_image:
-                raise ValidationError("For a number field, only value_number should be provided.")
+                raise ValidationError(f"The field '{self.field.name}' only accepts number values.")
         elif self.field.field_type == 'price':
             if self.value_number is None or self.value_number < 0:
-                raise ValidationError("A non-negative value_number is required for a price field.")
+                raise ValidationError(f"Please provide a non-negative price for the field '{self.field.name}'.")
             if self.value_text is not None or self.value_image:
-                raise ValidationError("For a price field, only value_number should be provided.")
+                raise ValidationError(f"The field '{self.field.name}' only accepts price values.")
         elif self.field.field_type == 'image':
             if not self.value_image:
-                raise ValidationError("A non-empty value_image is required for an image field.")
+                raise ValidationError(f"Please upload an image for the field '{self.field.name}'.")
             if self.value_text is not None or self.value_number is not None:
-                raise ValidationError("For an image field, only value_image should be provided.")
+                raise ValidationError(f"The field '{self.field.name}' only accepts image values.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -487,6 +545,9 @@ class ItemData(models.Model):
         return f"{self.item} - {self.field.name}: {self.value_text or self.value_number or '-'}"
 
 class UserExclusivePrice(models.Model):
+    """
+    Stores exclusive discount percentages for specific users and items.
+    """
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     item = models.ForeignKey(Item, on_delete=models.CASCADE)
     discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, help_text="Discount percentage")
@@ -502,8 +563,12 @@ class UserExclusivePrice(models.Model):
         verbose_name_plural = 'user exclusive prices'
 
     def clean(self):
-        if self.discount_percentage < 0 or self.discount_percentage > 100:
-            raise ValidationError("Discount percentage must be between 0 and 100.")
+        if self.discount_percentage is None or self.discount_percentage < 0 or self.discount_percentage > 100:
+            raise ValidationError("Please provide a discount percentage between 0 and 100.")
+        if not self.user:
+            raise ValidationError("Please select a user for this exclusive price.")
+        if not self.item:
+            raise ValidationError("Please select an item for this exclusive price.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -511,3 +576,267 @@ class UserExclusivePrice(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.item} ({self.discount_percentage}% off)"
+
+class Cart(models.Model):
+    """
+    Represents a user's shopping cart, storing items before order creation.
+    """
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='cart',
+        help_text="The user associated with this cart."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'cart'
+        verbose_name_plural = 'carts'
+
+    def calculate_total(self):
+        """Calculate the total cart amount, including discounts."""
+        total = Decimal('0.00')
+        for item in self.items.all():
+            total += item.subtotal()
+        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def __str__(self):
+        return f"Cart for {self.user.email}"
+
+    @classmethod
+    def get_or_create_cart(cls, user):
+        """Safely retrieve or create a cart for the given user."""
+        cart, created = cls.objects.get_or_create(user=user)
+        return cart, created
+
+# Signal to create a cart when a user is created
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def create_user_cart(sender, instance, created, **kwargs):
+    if created:
+        Cart.objects.get_or_create(user=instance)
+
+class CartItem(models.Model):
+    """
+    Represents an item in a cart with quantity, pricing tier, and unit type.
+    """
+    cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name='cart_items')
+    pricing_tier = models.ForeignKey(PricingTier, on_delete=models.PROTECT, related_name='cart_items')
+    quantity = models.PositiveIntegerField()
+    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')))
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # Price per unit (not per pack/pallet)
+    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')  # Links to UserExclusivePrice
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['cart', 'item']),
+            models.Index(fields=['pricing_tier']),
+            models.Index(fields=['created_at']),
+        ]
+        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type')
+        verbose_name = 'cart item'
+        verbose_name_plural = 'cart items'
+
+    @property
+    def total_units(self):
+        """Calculate the total number of units based on quantity and unit type."""
+        if not self.item or not self.item.product_variant:
+            return 0
+        units_per = (
+            self.item.product_variant.units_per_pack
+            if self.unit_type == 'pack'
+            else self.item.product_variant.units_per_pallet
+        )
+        return self.quantity * units_per
+
+    def clean(self):
+        if self.quantity <= 0:
+            raise ValidationError("Please provide a positive quantity.")
+        if not self.item:
+            raise ValidationError("Please select an item for this cart entry.")
+        if not self.pricing_tier:
+            raise ValidationError("Please select a pricing tier for this cart entry.")
+        if self.pricing_tier.product_variant != self.item.product_variant:
+            raise ValidationError("The pricing tier must belong to the same product variant as the item.")
+        if self.unit_type != self.pricing_tier.tier_type:
+            raise ValidationError("The unit type must match the pricing tier type (pack or pallet).")
+        if self.item.product_variant.show_units_per == 'pack' and self.unit_type != 'pack':
+            raise ValidationError("This item only supports 'pack' unit type.")
+        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type != 'pallet':
+            raise ValidationError("This item only supports 'pallet' unit type.")
+        if self.item.track_inventory:
+            total_units = self.total_units
+            if self.item.stock is None or total_units > self.item.stock:
+                raise ValidationError(f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units.")
+        if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+            raise ValidationError(
+                f"The quantity {self.quantity} exceeds the pricing tier range "
+                f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+            )
+        if self.quantity < self.pricing_tier.range_start:
+            raise ValidationError(
+                f"The quantity {self.quantity} is below the pricing tier range "
+                f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+            )
+        if self.user_exclusive_price and (self.user_exclusive_price.item != self.item or self.user_exclusive_price.user != self.cart.user):
+            raise ValidationError("The user exclusive price must correspond to the selected item and cart user.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def subtotal(self):
+        """Calculate the subtotal for this cart item, including discounts."""
+        # Calculate total units based on unit_type
+        total_units = self.total_units  # Uses units_per_pack or units_per_pallet * quantity
+
+        # Apply unit price to total units
+        base_subtotal = Decimal(total_units) * self.unit_price
+
+        # Apply discount if user_exclusive_price exists
+        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        discounted_subtotal = base_subtotal * (Decimal('1.00') - discount)
+
+        # Round to 2 decimal places
+        return discounted_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def __str__(self):
+        return f"{self.item} in cart {self.cart} ({self.quantity} {self.unit_type})"
+
+class Order(models.Model):
+    """
+    Represents a user's order with items, shipping, and payment details.
+    """
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('shipped', 'Shipped'),
+        ('delivered', 'Delivered'),
+        ('cancelled', 'Cancelled'),
+    )
+    PAYMENT_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+    )
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    shipping_address = models.TextField()
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
+    payment_method = models.CharField(max_length=100, blank=True)
+    transaction_id = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'order'
+        verbose_name_plural = 'orders'
+
+    def clean(self):
+        if self.total_amount < 0:
+            raise ValidationError("Total amount cannot be negative.")
+        if self.payment_status == 'completed' and not self.payment_method:
+            raise ValidationError("Payment method is required when payment status is 'completed'.")
+        if self.payment_status == 'completed' and not self.transaction_id:
+            raise ValidationError("Transaction ID is required when payment status is 'completed'.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Order {self.id} by {self.user.email} ({self.status})"
+
+class OrderItem(models.Model):
+    """
+    Represents an item in an order with quantity, pricing tier, and unit type.
+    """
+    order = models.ForeignKeyorder = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
+    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name='order_items')
+    pricing_tier = models.ForeignKey(PricingTier, on_delete=models.PROTECT, related_name='order_items')
+    quantity = models.PositiveIntegerField()
+    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')))
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='orderitem_items')  # Links to UserExclusivePrice
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['order', 'item']),
+            models.Index(fields=['pricing_tier']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'order item'
+        verbose_name_plural = 'order items'
+
+    @property
+    def total_units(self):
+        """Calculate the total number of units based on quantity and unit type."""
+        if not self.item or not self.item.product_variant:
+            return 0
+        units_per = (
+            self.item.product_variant.units_per_pack
+            if self.unit_type == 'pack'
+            else self.item.product_variant.units_per_pallet
+        )
+        return self.quantity * units_per
+
+    def clean(self):
+        if self.quantity <= 0:
+            raise ValidationError("Please provide a positive quantity.")
+        if not self.item:
+            raise ValidationError("Please select an item for this order entry.")
+        if not self.pricing_tier:
+            raise ValidationError("Please select a pricing tier for this order entry.")
+        if self.pricing_tier.product_variant != self.item.product_variant:
+            raise ValidationError("The pricing tier must belong to the same product variant as the item.")
+        if self.unit_type != self.pricing_tier.tier_type:
+            raise ValidationError("The unit type must match the pricing tier type (pack or pallet).")
+        if self.item.product_variant.show_units_per == 'pack' and self.unit_type != 'pack':
+            raise ValidationError("This item only supports 'pack' unit type.")
+        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type != 'pallet':
+            raise ValidationError("This item only supports 'pallet' unit type.")
+        if self.item.track_inventory:
+            total_units = self.total_units
+            if self.item.stock is None or total_units > self.item.stock:
+                raise ValidationError(f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units.")
+        if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+            raise ValidationError(
+                f"The quantity {self.quantity} exceeds the pricing tier range "
+                f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+            )
+        if self.quantity < self.pricing_tier.range_start:
+            raise ValidationError(
+                f"The quantity {self.quantity} is below the pricing tier range "
+                f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+            )
+        if self.user_exclusive_price and (self.user_exclusive_price.item != self.item or self.user_exclusive_price.user != self.order.user):
+            raise ValidationError("The user exclusive price must correspond to the selected item and order user.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def subtotal(self):
+        """Calculate the subtotal for this order item, including discounts."""
+        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        discounted_price = self.unit_price * (Decimal('1.00') - discount)
+        subtotal = discounted_price * Decimal(self.quantity)
+        return subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def __str__(self):
+        return f"{self.item} in order {self.order} ({self.quantity} {self.unit_type})"

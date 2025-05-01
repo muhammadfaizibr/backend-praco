@@ -4,15 +4,22 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
-from ecommerce.models import Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData, TableField, Item, ItemImage, ItemData, UserExclusivePrice
+from ecommerce.models import (
+    Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
+)
 from ecommerce.serializers import (
     CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer,
-    PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer, ItemImageSerializer,
-    ItemDataSerializer, UserExclusivePriceSerializer
+    PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer,
+    ItemImageSerializer, ItemDataSerializer, UserExclusivePriceSerializer,
+    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer
 )
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
 from django.db.models import Q
 from decimal import Decimal
+from rest_framework.exceptions import PermissionDenied
+from django.core.exceptions import ValidationError
+from django.db import transaction
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
@@ -34,7 +41,6 @@ class CategoryViewSet(viewsets.ModelViewSet):
         if slug:
             queryset = queryset.filter(slug=slug)
         return queryset
-    
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -52,7 +58,7 @@ class ProductImageViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [AllowAny()]
-    
+
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all().select_related('category').prefetch_related('images')
     serializer_class = ProductSerializer
@@ -82,22 +88,13 @@ class ProductViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(slug=slug)
 
         if search_query:
-            # Sanitize search query
             search_query = search_query.strip()
             if search_query:
-                # Use raw string for icontains filter
                 raw_query = search_query
-                # Prepare search query for full-text search
-                ts_query = ' '.join(search_query.split())  # Normalize spaces
+                ts_query = ' '.join(search_query.split())
                 search_query_obj = SearchQuery(ts_query, config='english', search_type='plain')
-                
-                # Define search vector
                 search_vector = SearchVector('name', weight='A') + SearchVector('description', weight='B')
-                
-                # Add ranking for sorting
                 search_rank = SearchRank(search_vector, search_query_obj)
-                
-                # Highlight matched terms in description
                 search_headline = SearchHeadline(
                     'description',
                     search_query_obj,
@@ -107,22 +104,19 @@ class ProductViewSet(viewsets.ModelViewSet):
                     stop_sel='</b>',
                     config='english'
                 )
-                
-                # Annotate and filter
                 queryset = queryset.annotate(
-                    search=search_vector,  # Annotate with search vector
+                    search=search_vector,
                     rank=search_rank,
                     headline=search_headline
                 ).filter(
-                    search=search_query_obj  # Use annotated search field
+                    search=search_query_obj
                 ).filter(
-                    Q(name__icontains=raw_query) | Q(description__icontains=raw_query)  # Fallback
+                    Q(name__icontains=raw_query) | Q(description__icontains=raw_query)
                 ).order_by('-rank')
 
         return queryset
 
     def get_serializer_context(self):
-        # Pass search headline to serializer for highlighting
         context = super().get_serializer_context()
         search_query = self.request.query_params.get('search')
         if search_query and 'queryset' in context:
@@ -131,7 +125,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 if hasattr(obj, 'headline')
             }
         return context
-           
+
 class ProductVariantViewSet(viewsets.ModelViewSet):
     queryset = ProductVariant.objects.all().select_related('product').prefetch_related('pricing_tiers__pricing_data')
     serializer_class = ProductVariantSerializer
@@ -148,12 +142,11 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
     def calculate_price(self, request, pk=None):
         product_variant = self.get_object()
         units = int(request.query_params.get('units', 0))
-        price_per = request.query_params.get('price_per', 'pack')  # 'pack' or 'unit'
+        price_per = request.query_params.get('price_per', 'pack')  # 'pack' or 'pallet'
 
         if units <= 0:
             return Response({"error": "Units must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Determine the number of packs or pallets based on show_units_per
         units_per_pack = product_variant.units_per_pack
         units_per_pallet = product_variant.units_per_pallet
         show_units_per = product_variant.show_units_per
@@ -171,9 +164,6 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             if remaining_units > 0:
                 pallets += 1
 
-        # Since price_per_pack and price_per_unit are removed, we need to find an Item associated with this ProductVariant
-        # For simplicity, we'll assume we're calculating for the first Item associated with this ProductVariant
-        # In a real application, you might want to pass an item_id as a query parameter
         try:
             item = product_variant.items.first()
             if not item:
@@ -181,8 +171,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
         except Item.DoesNotExist:
             return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Determine the applicable pricing tier and price from PricingTierData
-        total = 0
+        total = Decimal('0.00')
         if show_units_per in ['pack', 'both'] and price_per == 'pack':
             tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
             applicable_tier = None
@@ -197,7 +186,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                     total = packs * pricing_data.price
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
-        elif show_units_per in ['pallet', 'both'] and price_per == 'pack' and pallets > 0:
+        elif show_units_per in ['pallet', 'both'] and price_per == 'pallet':
             tiers = product_variant.pricing_tiers.filter(tier_type='pallet').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
@@ -212,7 +201,6 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            # Price per unit calculation requires deriving the unit price from the pack price
             tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
@@ -223,7 +211,6 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             if applicable_tier:
                 try:
                     pricing_data = PricingTierData.objects.get(item=item, pricing_tier=applicable_tier)
-                    # Derive price per unit: price per pack / units per pack
                     price_per_unit = pricing_data.price / units_per_pack
                     total = units * price_per_unit
                 except PricingTierData.DoesNotExist:
@@ -233,7 +220,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             'units': units,
             'packs': packs,
             'pallets': pallets,
-            'total': float(total)  # Convert Decimal to float for JSON serialization
+            'total': float(total)
         })
 
 class PricingTierViewSet(viewsets.ModelViewSet):
@@ -306,30 +293,26 @@ class ItemViewSet(viewsets.ModelViewSet):
         approx_size = self.request.query_params.get('approx_size', '').lower() == 'true'
         minimum_size = self.request.query_params.get('minimum_size', '').lower() == 'true'
 
-        # Validate measurement unit
         valid_units = ['MM', 'CM', 'IN', 'M']
         if measurement_unit and measurement_unit not in valid_units:
-            return queryset.none()  # Return empty queryset for invalid unit
+            return queryset.none()
 
-        # Filter by category
         if category:
             category = category.lower()
             valid_categories = ['box', 'boxes', 'bag', 'bags', 'postal', 'postals']
             if category in valid_categories:
                 queryset = queryset.filter(product_variant__product__category__name__iexact=category)
             else:
-                return queryset.none()  # Invalid category
+                return queryset.none()
 
-        # Handle dimension-based search
         if width and length and height:
             try:
                 width = Decimal(width)
                 length = Decimal(length)
                 height = Decimal(height)
             except (ValueError, TypeError):
-                return queryset.none()  # Invalid dimensions
+                return queryset.none()
 
-            # Conversion factors to inches (IN) as base unit for comparison
             to_inches = {
                 'MM': Decimal('0.0393701'),
                 'CM': Decimal('0.393701'),
@@ -343,9 +326,7 @@ class ItemViewSet(viewsets.ModelViewSet):
                 'M': Decimal('0.0254'),
             }
 
-            # Initialize Q objects for filtering
             dimension_filter = Q()
-
             for item in queryset:
                 item_width = item.width
                 item_length = item.length
@@ -353,22 +334,17 @@ class ItemViewSet(viewsets.ModelViewSet):
                 item_unit = item.measurement_unit
 
                 if item_width is None or item_length is None or item_height is None or not item_unit:
-                    continue  # Skip items with incomplete dimensions
+                    continue
 
-                # Convert item dimensions to frontend's measurement unit (e.g., IN)
                 if item_unit != measurement_unit and measurement_unit:
-                    # Convert to inches first
                     item_width = item_width * to_inches[item_unit]
                     item_length = item_length * to_inches[item_unit]
                     item_height = item_height * to_inches[item_unit]
-                    # Convert from inches to target unit
                     item_width = item_width * from_inches[measurement_unit]
                     item_length = item_length * from_inches[measurement_unit]
                     item_height = item_height * from_inches[measurement_unit]
 
-                # Define tolerances
                 if approx_size:
-                    # ±10% tolerance for approximate size
                     width_min = width * Decimal('0.9')
                     width_max = width * Decimal('1.1')
                     length_min = length * Decimal('0.9')
@@ -382,7 +358,6 @@ class ItemViewSet(viewsets.ModelViewSet):
                         height__gte=height_min, height__lte=height_max
                     )
                 elif minimum_size:
-                    # Minimum size: dimensions >= input
                     dimension_filter |= Q(
                         id=item.id,
                         width__gte=width,
@@ -390,7 +365,6 @@ class ItemViewSet(viewsets.ModelViewSet):
                         height__gte=height
                     )
                 else:
-                    # Exact match with small tolerance (±0.01 in converted unit)
                     tolerance = Decimal('0.01')
                     dimension_filter |= Q(
                         id=item.id,
@@ -407,7 +381,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context.update({'request': self.request})
         return context
-    
+
 class ItemDataViewSet(viewsets.ModelViewSet):
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
     serializer_class = ItemDataSerializer
@@ -430,4 +404,124 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
+        return [IsAuthenticated()]
+
+class CartViewSet(viewsets.ModelViewSet):
+    queryset = Cart.objects.all()
+    serializer_class = CartSerializer
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request, *args, **kwargs):
+        """
+        Retrieve the authenticated user's cart.
+        """
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to access cart.")
+        try:
+            cart, created = Cart.get_or_create_cart(request.user)
+            serializer = self.get_serializer(cart)
+            return Response(serializer.data)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def get_queryset(self):
+        """
+        Return the cart for the authenticated user.
+        """
+        if not self.request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to access cart.")
+        return self.queryset.filter(user=self.request.user)
+
+    @action(detail=False, methods=['delete'], url_path='clear')
+    def clear_cart(self, request):
+        """
+        Clear all items from the user's cart.
+        """
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to clear cart.")
+        try:
+            cart, created = Cart.get_or_create_cart(request.user)
+            cart.items.all().delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class CartItemViewSet(viewsets.ModelViewSet):
+    queryset = CartItem.objects.all()
+    serializer_class = CartItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """
+        Return cart items for the authenticated user's cart.
+        """
+        if not self.request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to access cart items.")
+        try:
+            cart, created = Cart.get_or_create_cart(self.request.user)
+            return self.queryset.filter(cart=cart)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def create(self, request, *args, **kwargs):
+        """
+        Create one or more cart items for the authenticated user's cart.
+        """
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to add cart items.")
+        try:
+            cart, created = Cart.get_or_create_cart(request.user)
+            data = request.data
+
+            # Handle both single item and bulk creation
+            if isinstance(data, list):
+                serializer = self.get_serializer(data=[{**item, 'cart': cart.id} for item in data], many=True)
+            else:
+                serializer = self.get_serializer(data={**data, 'cart': cart.id})
+
+            serializer.is_valid(raise_exception=True)
+            
+            with transaction.atomic():
+                self.perform_create(serializer)
+            
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class OrderViewSet(viewsets.ModelViewSet):
+    queryset = Order.objects.all().select_related('user').prefetch_related('items__item', 'items__pricing_tier')
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['user', 'status', 'payment_status']
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return self.queryset
+        return self.queryset.filter(user=self.request.user)
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class OrderItemViewSet(viewsets.ModelViewSet):
+    queryset = OrderItem.objects.all().select_related('order__user', 'item', 'pricing_tier')
+    serializer_class = OrderItemSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['order', 'item', 'unit_type']
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return self.queryset
+        return self.queryset.filter(order__user=self.request.user)
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated()]
         return [IsAuthenticated()]

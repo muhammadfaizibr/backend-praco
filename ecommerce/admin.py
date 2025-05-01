@@ -1,6 +1,10 @@
 from django.contrib import admin
 from django import forms
-from .models import Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData, TableField, Item, ItemImage, ItemData, UserExclusivePrice
+from .models import (
+    Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
+)
+from decimal import Decimal
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at')
@@ -8,12 +12,12 @@ class CategoryAdmin(admin.ModelAdmin):
     list_filter = ('created_at',)
     ordering = ('name',)
     fields = ('name', 'slug', 'description', 'image', 'slider_image')
+    prepopulated_fields = {'slug': ('name',)}
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
 
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
@@ -30,6 +34,7 @@ class ProductAdmin(admin.ModelAdmin):
     list_filter = ('category', 'is_new', 'created_at')
     ordering = ('name',)
     inlines = [ProductImageInline]
+    prepopulated_fields = {'slug': ('name',)}
 
     class Media:
         css = {
@@ -46,6 +51,8 @@ class PricingTierForm(forms.ModelForm):
         range_start = cleaned_data.get('range_start')
         range_end = cleaned_data.get('range_end')
         no_end_range = cleaned_data.get('no_end_range')
+        tier_type = cleaned_data.get('tier_type')
+        product_variant = cleaned_data.get('product_variant')
 
         if range_start is None:
             raise forms.ValidationError("Range start is required and must be a positive integer.")
@@ -60,12 +67,37 @@ class PricingTierForm(forms.ModelForm):
             if range_end < range_start:
                 raise forms.ValidationError("Range end must be greater than or equal to range start.")
 
+        # Check for pack tier requirement for pallet tiers
+        if tier_type == 'pallet' and product_variant and product_variant.show_units_per != 'pallet':
+            existing_pack_tiers = PricingTier.objects.filter(
+                product_variant=product_variant,
+                tier_type='pack'
+            ).exclude(id=self.instance.id)
+            if not existing_pack_tiers.exists():
+                raise forms.ValidationError(
+                    "You must create at least one 'pack' pricing tier before adding a 'pallet' pricing tier, "
+                    "unless 'Show Units Per' is set to 'Pallet Only'."
+                )
+
         return cleaned_data
 
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 1
     form = PricingTierForm
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class PricingTierAdmin(admin.ModelAdmin):
+    list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
+    search_fields = ('product_variant__name', 'tier_type')
+    list_filter = ('tier_type', 'no_end_range', 'created_at')
+    ordering = ('product_variant', 'tier_type', 'range_start')
+    form = PricingTierForm
+    autocomplete_fields = ['product_variant']
 
     class Media:
         css = {
@@ -273,6 +305,77 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'item__sku')
     list_filter = ('created_at',)
     ordering = ('user',)
+    autocomplete_fields = ['user', 'item']
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class CartItemInline(admin.TabularInline):
+    model = CartItem
+    extra = 1
+    autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
+    readonly_fields = ('unit_price', 'user_exclusive_price', 'subtotal')
+
+    def subtotal(self, obj):
+        return obj.subtotal() if obj.pk else Decimal('0.00')
+    subtotal.short_description = 'Subtotal'
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class CartAdmin(admin.ModelAdmin):
+    list_display = ('user', 'created_at', 'calculate_total')
+    search_fields = ('user__email',)
+    list_filter = ('created_at',)
+    ordering = ('user',)
+    inlines = [CartItemInline]
+    readonly_fields = ('created_at', 'calculate_total')
+    autocomplete_fields = ['user']
+
+    def calculate_total(self, obj):
+        return obj.calculate_total()
+    calculate_total.short_description = 'Total'
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 1
+    autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
+    readonly_fields = ('unit_price', 'user_exclusive_price', 'subtotal')
+
+    def subtotal(self, obj):
+        return obj.subtotal() if obj.pk else Decimal('0.00')
+    subtotal.short_description = 'Subtotal'
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class OrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'user', 'status', 'total_amount', 'payment_status',
+        'payment_method', 'created_at'
+    )
+    search_fields = ('user__email', 'transaction_id')
+    list_filter = ('status', 'payment_status', 'payment_method', 'created_at')
+    ordering = ('-created_at',)
+    inlines = [OrderItemInline]
+    readonly_fields = ('created_at', 'total_amount')
+    autocomplete_fields = ['user']
+    list_editable = ('status', 'payment_status', 'payment_method')
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        form.instance.calculate_total()
 
     class Media:
         css = {
@@ -282,5 +385,8 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)
 admin.site.register(ProductVariant, ProductVariantAdmin)
+admin.site.register(PricingTier, PricingTierAdmin)
 admin.site.register(Item, ItemAdmin)
 admin.site.register(UserExclusivePrice, UserExclusivePriceAdmin)
+admin.site.register(Cart, CartAdmin)
+admin.site.register(Order, OrderAdmin)
