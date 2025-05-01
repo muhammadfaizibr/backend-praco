@@ -250,9 +250,14 @@ class ItemDataInline(admin.TabularInline):
         js = ('admin/js/filter_item_data.js',)
 
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'product_variant', 'is_physical_product', 'status', 'created_at')
+    list_display = (
+        'sku', 'product_variant', 'is_physical_product', 'status',
+        'height', 'width', 'length', 'measurement_unit', 'created_at'
+    )
     search_fields = ('sku', 'product_variant__name')
-    list_filter = ('product_variant', 'is_physical_product', 'status', 'created_at')
+    list_filter = (
+        'product_variant', 'is_physical_product', 'status', 'measurement_unit', 'created_at'
+    )
     ordering = ('sku',)
     inlines = [PricingTierDataInline, ItemImageInline, ItemDataInline]
     autocomplete_fields = ['product_variant']

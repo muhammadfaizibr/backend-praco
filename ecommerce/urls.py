@@ -24,14 +24,17 @@ urlpatterns = [
     path('ckeditor/', include('ckeditor_uploader.urls')),
 ]
  
-
-# search / adavance search
+# product details
 # cart
-# excusive pricing
+# checkout
+# search / adavance search
+# ui fixes
+    # navigation styling
+    # loading animation
+# exclusive pricing # ALAHAMDULILLAH done
 
 # ui fixes
 # test apis
 
-# tracking
-# checkout / shipping
 # email sending
+# tracking

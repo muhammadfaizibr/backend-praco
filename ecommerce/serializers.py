@@ -14,10 +14,16 @@ class ProductImageSerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
     category = CategorySerializer(read_only=True)
+    description = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = ['id', 'category', 'name', 'slug', 'description', 'is_new', 'created_at', 'images']
+
+    def get_description(self, obj):
+        # Return highlighted description if search query exists
+        search_headline = self.context.get('search_headline', {}).get(obj.id)
+        return search_headline or obj.description
 
 class PricingTierDataSerializer(serializers.ModelSerializer):
     class Meta:
@@ -53,7 +59,8 @@ class PricingTierSerializer(serializers.ModelSerializer):
 
 class ProductVariantSerializer(serializers.ModelSerializer):
     pricing_tiers = PricingTierSerializer(many=True, read_only=True)
-
+    product = ProductSerializer(read_only=True)
+    
     class Meta:
         model = ProductVariant
         fields = [
@@ -159,13 +166,15 @@ class ItemSerializer(serializers.ModelSerializer):
     images = ItemImageSerializer(many=True, read_only=True)
     pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
     data_entries = ItemDataSerializer(many=True, read_only=True)
+    product_variant = ProductVariantSerializer(read_only=True)
+    depth = 3
 
     class Meta:
         model = Item
         fields = [
             'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
             'track_inventory', 'stock', 'title', 'status', 'created_at', 'images',
-            'pricing_tier_data', 'data_entries'
+            'pricing_tier_data', 'data_entries', 'height', 'width', 'length', 'measurement_unit'
         ]
 
     def validate(self, data):
@@ -175,6 +184,36 @@ class ItemSerializer(serializers.ModelSerializer):
         track_inventory = data.get('track_inventory', False)
         stock = data.get('stock')
         title = data.get('title')
+        height = data.get('height')
+        width = data.get('width')
+        length = data.get('length')
+        measurement_unit = data.get('measurement_unit')
+
+        product_variant = data.get('product_variant')
+        if not product_variant and self.instance:
+            product_variant = self.instance.product_variant
+
+        required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
+        category_name = ''
+        if product_variant and product_variant.product and product_variant.product.category:
+            category_name = product_variant.product.category.name.lower()
+
+        if category_name in required_categories:
+            if height is None or height <= 0:
+                raise serializers.ValidationError("Height must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if width is None or width <= 0:
+                raise serializers.ValidationError("Width must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if length is None or length <= 0:
+                raise serializers.ValidationError("Length must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if not measurement_unit:
+                raise serializers.ValidationError("Measurement unit must be provided for items in categories: box, boxes, postal, postals, bag, bags.")
+            if measurement_unit not in ['MM', 'CM', 'IN', 'M']:
+                raise serializers.ValidationError("Measurement unit must be one of: MM, CM, IN, M.")
+        else:
+            data['height'] = None
+            data['width'] = None
+            data['length'] = None
+            data['measurement_unit'] = None
 
         if is_physical_product:
             if weight is None or weight <= 0:
@@ -195,7 +234,7 @@ class ItemSerializer(serializers.ModelSerializer):
             data['title'] = None
 
         return data
-
+    
 class UserExclusivePriceSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserExclusivePrice

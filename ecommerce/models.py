@@ -3,6 +3,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from ckeditor.fields import RichTextField
 from django.utils.text import slugify
+from django.core.validators import MinValueValidator
 
 class Category(models.Model):
     name = models.CharField(max_length=255, unique=True)
@@ -324,8 +325,14 @@ class Item(models.Model):
         ('oz', 'Ounces (oz)'),
         ('g', 'Grams (g)'),
     )
+    MEASUREMENT_UNIT_CHOICES = (
+        ('MM', 'Millimeters'),
+        ('CM', 'Centimeters'),
+        ('IN', 'Inches'),
+        ('M', 'Meters'),
+    )
 
-    product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='items')
+    product_variant = models.ForeignKey('ProductVariant', on_delete=models.CASCADE, related_name='items')
     sku = models.CharField(max_length=100, unique=True)
     is_physical_product = models.BooleanField(default=False)
     weight = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
@@ -335,6 +342,10 @@ class Item(models.Model):
     title = models.CharField(max_length=255, blank=True, null=True)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft')
     created_at = models.DateTimeField(auto_now_add=True)
+    height = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, validators=[MinValueValidator(0.0)])
+    width = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, validators=[MinValueValidator(0.0)])
+    length = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True, validators=[MinValueValidator(0.0)])
+    measurement_unit = models.CharField(max_length=2, choices=MEASUREMENT_UNIT_CHOICES, blank=True, null=True)
 
     class Meta:
         indexes = [
@@ -347,6 +358,7 @@ class Item(models.Model):
         verbose_name_plural = 'items'
 
     def clean(self):
+        # Existing validations
         if not self.sku:
             raise ValidationError("SKU cannot be empty.")
         if self.is_physical_product:
@@ -366,13 +378,34 @@ class Item(models.Model):
             self.stock = None
             self.title = None
 
+        # Category-based validation
+        category_name = self.product_variant.product.category.name.lower() if self.product_variant and self.product_variant.product and self.product_variant.product.category else ''
+        required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
+
+        if category_name in required_categories:
+            if self.height is None or self.height <= 0:
+                raise ValidationError("Height must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if self.width is None or self.width <= 0:
+                raise ValidationError("Width must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if self.length is None or self.length <= 0:
+                raise ValidationError("Length must be provided and greater than 0 for items in categories: box, boxes, postal, postals, bag, bags.")
+            if not self.measurement_unit:
+                raise ValidationError("Measurement unit must be provided for items in categories: box, boxes, postal, postals, bag, bags.")
+            if self.measurement_unit not in ['MM', 'CM', 'IN', 'M']:
+                raise ValidationError("Measurement unit must be one of: MM, CM, IN, M.")
+        else:
+            self.height = None
+            self.width = None
+            self.length = None
+            self.measurement_unit = None
+
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Item {self.sku} for {self.product_variant.name} ({self.status})"
-
+    
 class ItemImage(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='item_images/')

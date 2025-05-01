@@ -10,6 +10,9 @@ from ecommerce.serializers import (
     PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer, ItemImageSerializer,
     ItemDataSerializer, UserExclusivePriceSerializer
 )
+from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
+from django.db.models import Q
+from decimal import Decimal
 
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
@@ -66,6 +69,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         queryset = super().get_queryset()
         category_slug = self.request.query_params.get('category')
         slug = self.request.query_params.get('slug')
+        search_query = self.request.query_params.get('search')
 
         if category_slug:
             try:
@@ -77,8 +81,57 @@ class ProductViewSet(viewsets.ModelViewSet):
         if slug:
             queryset = queryset.filter(slug=slug)
 
+        if search_query:
+            # Sanitize search query
+            search_query = search_query.strip()
+            if search_query:
+                # Use raw string for icontains filter
+                raw_query = search_query
+                # Prepare search query for full-text search
+                ts_query = ' '.join(search_query.split())  # Normalize spaces
+                search_query_obj = SearchQuery(ts_query, config='english', search_type='plain')
+                
+                # Define search vector
+                search_vector = SearchVector('name', weight='A') + SearchVector('description', weight='B')
+                
+                # Add ranking for sorting
+                search_rank = SearchRank(search_vector, search_query_obj)
+                
+                # Highlight matched terms in description
+                search_headline = SearchHeadline(
+                    'description',
+                    search_query_obj,
+                    max_words=35,
+                    min_words=15,
+                    start_sel='<b>',
+                    stop_sel='</b>',
+                    config='english'
+                )
+                
+                # Annotate and filter
+                queryset = queryset.annotate(
+                    search=search_vector,  # Annotate with search vector
+                    rank=search_rank,
+                    headline=search_headline
+                ).filter(
+                    search=search_query_obj  # Use annotated search field
+                ).filter(
+                    Q(name__icontains=raw_query) | Q(description__icontains=raw_query)  # Fallback
+                ).order_by('-rank')
+
         return queryset
-    
+
+    def get_serializer_context(self):
+        # Pass search headline to serializer for highlighting
+        context = super().get_serializer_context()
+        search_query = self.request.query_params.get('search')
+        if search_query and 'queryset' in context:
+            context['search_headline'] = {
+                obj.id: obj.headline for obj in context['queryset']
+                if hasattr(obj, 'headline')
+            }
+        return context
+           
 class ProductVariantViewSet(viewsets.ModelViewSet):
     queryset = ProductVariant.objects.all().select_related('product').prefetch_related('pricing_tiers__pricing_data')
     serializer_class = ProductVariantSerializer
@@ -232,7 +285,7 @@ class ItemImageViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class ItemViewSet(viewsets.ModelViewSet):
-    queryset = Item.objects.all().select_related('product_variant__product').prefetch_related('data_entries__field', 'images', 'pricing_tier_data')
+    queryset = Item.objects.all().select_related('product_variant__product__category').prefetch_related('data_entries__field', 'images', 'pricing_tier_data')
     serializer_class = ItemSerializer
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
@@ -242,6 +295,113 @@ class ItemViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [AllowAny()]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        width = self.request.query_params.get('width')
+        length = self.request.query_params.get('length')
+        height = self.request.query_params.get('height')
+        measurement_unit = self.request.query_params.get('measurement_unit', '').upper()
+        category = self.request.query_params.get('category')
+        approx_size = self.request.query_params.get('approx_size', '').lower() == 'true'
+        minimum_size = self.request.query_params.get('minimum_size', '').lower() == 'true'
+
+        # Validate measurement unit
+        valid_units = ['MM', 'CM', 'IN', 'M']
+        if measurement_unit and measurement_unit not in valid_units:
+            return queryset.none()  # Return empty queryset for invalid unit
+
+        # Filter by category
+        if category:
+            category = category.lower()
+            valid_categories = ['box', 'boxes', 'bag', 'bags', 'postal', 'postals']
+            if category in valid_categories:
+                queryset = queryset.filter(product_variant__product__category__name__iexact=category)
+            else:
+                return queryset.none()  # Invalid category
+
+        # Handle dimension-based search
+        if width and length and height:
+            try:
+                width = Decimal(width)
+                length = Decimal(length)
+                height = Decimal(height)
+            except (ValueError, TypeError):
+                return queryset.none()  # Invalid dimensions
+
+            # Conversion factors to inches (IN) as base unit for comparison
+            to_inches = {
+                'MM': Decimal('0.0393701'),
+                'CM': Decimal('0.393701'),
+                'IN': Decimal('1.0'),
+                'M': Decimal('39.3701'),
+            }
+            from_inches = {
+                'MM': Decimal('25.4'),
+                'CM': Decimal('2.54'),
+                'IN': Decimal('1.0'),
+                'M': Decimal('0.0254'),
+            }
+
+            # Initialize Q objects for filtering
+            dimension_filter = Q()
+
+            for item in queryset:
+                item_width = item.width
+                item_length = item.length
+                item_height = item.height
+                item_unit = item.measurement_unit
+
+                if item_width is None or item_length is None or item_height is None or not item_unit:
+                    continue  # Skip items with incomplete dimensions
+
+                # Convert item dimensions to frontend's measurement unit (e.g., IN)
+                if item_unit != measurement_unit and measurement_unit:
+                    # Convert to inches first
+                    item_width = item_width * to_inches[item_unit]
+                    item_length = item_length * to_inches[item_unit]
+                    item_height = item_height * to_inches[item_unit]
+                    # Convert from inches to target unit
+                    item_width = item_width * from_inches[measurement_unit]
+                    item_length = item_length * from_inches[measurement_unit]
+                    item_height = item_height * from_inches[measurement_unit]
+
+                # Define tolerances
+                if approx_size:
+                    # ±10% tolerance for approximate size
+                    width_min = width * Decimal('0.9')
+                    width_max = width * Decimal('1.1')
+                    length_min = length * Decimal('0.9')
+                    length_max = length * Decimal('1.1')
+                    height_min = height * Decimal('0.9')
+                    height_max = height * Decimal('1.1')
+                    dimension_filter |= Q(
+                        id=item.id,
+                        width__gte=width_min, width__lte=width_max,
+                        length__gte=length_min, length__lte=length_max,
+                        height__gte=height_min, height__lte=height_max
+                    )
+                elif minimum_size:
+                    # Minimum size: dimensions >= input
+                    dimension_filter |= Q(
+                        id=item.id,
+                        width__gte=width,
+                        length__gte=length,
+                        height__gte=height
+                    )
+                else:
+                    # Exact match with small tolerance (±0.01 in converted unit)
+                    tolerance = Decimal('0.01')
+                    dimension_filter |= Q(
+                        id=item.id,
+                        width__gte=width - tolerance, width__lte=width + tolerance,
+                        length__gte=length - tolerance, length__lte=length + tolerance,
+                        height__gte=height - tolerance, height__lte=height + tolerance
+                    )
+
+            queryset = queryset.filter(dimension_filter)
+
+        return queryset
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
