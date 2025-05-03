@@ -265,11 +265,11 @@ class PricingTier(models.Model):
 
 class PricingTierData(models.Model):
     """
-    Stores pricing data for an item within a pricing tier.
+    Stores pricing data for an item within a pricing tier, with price per unit.
     """
     item = models.ForeignKey('Item', on_delete=models.CASCADE, related_name='pricing_tier_data')
     pricing_tier = models.ForeignKey(PricingTier, on_delete=models.CASCADE, related_name='pricing_data')
-    price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price per pack if tier_type is 'pack', per pallet if 'pallet'")
+    price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -296,7 +296,7 @@ class PricingTierData(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.item} - {self.pricing_tier} - Price: {self.price}"
+        return f"{self.item} - {self.pricing_tier} - Price per unit: {self.price}"
 
 class TableField(models.Model):
     """
@@ -628,9 +628,11 @@ class CartItem(models.Model):
     item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name='cart_items')
     pricing_tier = models.ForeignKey(PricingTier, on_delete=models.PROTECT, related_name='cart_items')
     quantity = models.PositiveIntegerField()
-    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')))
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # Price per unit (not per pack/pallet)
-    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')  # Links to UserExclusivePrice
+    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')), default='pack')
+    per_unit_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit from PricingTierData")
+    per_pack_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per pack (price per unit * units per pack)")
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, help_text="Total cost before discounts (per pack price * quantity or adjusted for pallet)")
+    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -648,12 +650,12 @@ class CartItem(models.Model):
         """Calculate the total number of units based on quantity and unit type."""
         if not self.item or not self.item.product_variant:
             return 0
-        units_per = (
-            self.item.product_variant.units_per_pack
-            if self.unit_type == 'pack'
-            else self.item.product_variant.units_per_pallet
-        )
-        return self.quantity * units_per
+        units_per_pack = self.item.product_variant.units_per_pack
+        units_per_pallet = self.item.product_variant.units_per_pallet
+        if self.unit_type == 'pack':
+            return self.quantity * units_per_pack
+        else:  # pallet
+            return self.quantity * units_per_pallet
 
     def clean(self):
         if self.quantity <= 0:
@@ -664,48 +666,115 @@ class CartItem(models.Model):
             raise ValidationError("Please select a pricing tier for this cart entry.")
         if self.pricing_tier.product_variant != self.item.product_variant:
             raise ValidationError("The pricing tier must belong to the same product variant as the item.")
-        if self.unit_type != self.pricing_tier.tier_type:
-            raise ValidationError("The unit type must match the pricing tier type (pack or pallet).")
-        if self.item.product_variant.show_units_per == 'pack' and self.unit_type != 'pack':
-            raise ValidationError("This item only supports 'pack' unit type.")
-        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type != 'pallet':
-            raise ValidationError("This item only supports 'pallet' unit type.")
+        if self.item.product_variant.show_units_per == 'pack' and self.unit_type == 'pallet':
+            raise ValidationError("This item only supports pack pricing, not pallet pricing.")
+        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type == 'pack':
+            raise ValidationError("This item only supports pallet pricing, not pack pricing.")
+
+        # Calculate total units
+        total_units = self.total_units
+        units_per_pack = self.item.product_variant.units_per_pack
+        units_per_pallet = self.item.product_variant.units_per_pallet
+
+        # Validate quantity against pricing tier range based on unit type
+        if self.unit_type == 'pack':
+            if self.pricing_tier.tier_type == 'pallet':
+                # Allow pallet pricing tier with pack unit type, convert quantity to equivalent packs
+                pass
+            else:  # pack tier
+                if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+                    raise ValidationError(
+                        f"The quantity {self.quantity} exceeds the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                    )
+                if self.quantity < self.pricing_tier.range_start:
+                    raise ValidationError(
+                        f"The quantity {self.quantity} is below the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                    )
+        else:  # pallet
+            if self.pricing_tier.tier_type != 'pallet':
+                raise ValidationError("Pricing tier must be of type 'pallet' when unit type is 'pallet'.")
+            if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+                raise ValidationError(
+                    f"The pallet quantity {self.quantity} exceeds the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                )
+            if self.quantity < self.pricing_tier.range_start:
+                raise ValidationError(
+                    f"The pallet quantity {self.quantity} is below the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                )
+
+        # Validate per_unit_price, per_pack_price, and total_cost against PricingTierData
+        pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
+        if not pricing_data:
+            raise ValidationError("No pricing data found for this item and pricing tier.")
+        expected_per_unit_price = pricing_data.price
+        expected_per_pack_price = expected_per_unit_price * Decimal(units_per_pack)
+        
+        if self.per_unit_price != expected_per_unit_price:
+            raise ValidationError(
+                f"The per unit price {self.per_unit_price} does not match the expected price {expected_per_unit_price} "
+                f"from PricingTierData."
+            )
+        
+        if self.per_pack_price != expected_per_pack_price:
+            raise ValidationError(
+                f"The per pack price {self.per_pack_price} does not match the expected price {expected_per_pack_price} "
+                f"(per unit price {expected_per_unit_price} * {units_per_pack} units per pack)."
+            )
+        
+        # Calculate total_cost based on unit type
+        if self.unit_type == 'pack':
+            if self.pricing_tier.tier_type == 'pack':
+                expected_total_cost = expected_per_pack_price * Decimal(self.quantity)
+            else:  # pallet tier with pack unit type
+                # Convert pack quantity to total units and then to equivalent pallets, but use per_pack_price for final cost
+                total_units = Decimal(self.quantity) * Decimal(units_per_pack)
+                equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
+                expected_total_cost = equivalent_pallet_quantity * expected_per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
+        else:  # pallet
+            # Convert pallet quantity to total units
+            total_units = Decimal(self.quantity) * Decimal(units_per_pallet)
+            # Convert total units to equivalent pack quantity
+            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
+            # Calculate total cost using equivalent pack quantity and per_pack_price
+            expected_total_cost = equivalent_pack_quantity * expected_per_pack_price
+        
+        if self.total_cost != expected_total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):
+            raise ValidationError(
+                f"The total cost {self.total_cost} does not match the expected total cost {expected_total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)} "
+                f"for {self.unit_type} with quantity {self.quantity}."
+            )
+
+        # Validate stock
         if self.item.track_inventory:
-            total_units = self.total_units
             if self.item.stock is None or total_units > self.item.stock:
-                raise ValidationError(f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units.")
-        if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
-            raise ValidationError(
-                f"The quantity {self.quantity} exceeds the pricing tier range "
-                f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
-            )
-        if self.quantity < self.pricing_tier.range_start:
-            raise ValidationError(
-                f"The quantity {self.quantity} is below the pricing tier range "
-                f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
-            )
-        if self.user_exclusive_price and (self.user_exclusive_price.item != self.item or self.user_exclusive_price.user != self.cart.user):
-            raise ValidationError("The user exclusive price must correspond to the selected item and cart user.")
+                raise ValidationError(
+                    f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units."
+                )
+
+        # Validate user_exclusive_price
+        if self.user_exclusive_price:
+            if self.user_exclusive_price.item != self.item:
+                raise ValidationError("User exclusive price must correspond to the selected item.")
+            if self.user_exclusive_price.user != self.cart.user:
+                raise ValidationError("User exclusive price must correspond to the cart's user.")
+
+    def subtotal(self):
+        """Calculate the subtotal for this cart item, including discounts."""
+        if not self.total_cost or not self.quantity:
+            return Decimal('0.00')
+        # Apply discount to total_cost
+        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        discounted_subtotal = self.total_cost * (Decimal('1.00') - discount)
+        return discounted_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
-
-    def subtotal(self):
-        """Calculate the subtotal for this cart item, including discounts."""
-        # Calculate total units based on unit_type
-        total_units = self.total_units  # Uses units_per_pack or units_per_pallet * quantity
-
-        # Apply unit price to total units
-        base_subtotal = Decimal(total_units) * self.unit_price
-
-        # Apply discount if user_exclusive_price exists
-        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        discounted_subtotal = base_subtotal * (Decimal('1.00') - discount)
-
-        # Round to 2 decimal places
-        return discounted_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def __str__(self):
         return f"{self.item} in cart {self.cart} ({self.quantity} {self.unit_type})"
@@ -730,7 +799,7 @@ class Order(models.Model):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     shipping_address = models.TextField()
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
     payment_method = models.CharField(max_length=100, blank=True)
@@ -764,13 +833,15 @@ class OrderItem(models.Model):
     """
     Represents an item in an order with quantity, pricing tier, and unit type.
     """
-    order = models.ForeignKeyorder = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
     item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name='order_items')
     pricing_tier = models.ForeignKey(PricingTier, on_delete=models.PROTECT, related_name='order_items')
     quantity = models.PositiveIntegerField()
-    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')))
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
-    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='orderitem_items')  # Links to UserExclusivePrice
+    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')), default='pack')
+    per_unit_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit from PricingTierData")
+    per_pack_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per pack (price per unit * units per pack)")
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, help_text="Total cost before discounts (per pack price * quantity or adjusted for pallet)")
+    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='orderitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -787,12 +858,12 @@ class OrderItem(models.Model):
         """Calculate the total number of units based on quantity and unit type."""
         if not self.item or not self.item.product_variant:
             return 0
-        units_per = (
-            self.item.product_variant.units_per_pack
-            if self.unit_type == 'pack'
-            else self.item.product_variant.units_per_pallet
-        )
-        return self.quantity * units_per
+        units_per_pack = self.item.product_variant.units_per_pack
+        units_per_pallet = self.item.product_variant.units_per_pallet
+        if self.unit_type == 'pack':
+            return self.quantity * units_per_pack
+        else:  # pallet
+            return self.quantity * units_per_pallet
 
     def clean(self):
         if self.quantity <= 0:
@@ -803,40 +874,115 @@ class OrderItem(models.Model):
             raise ValidationError("Please select a pricing tier for this order entry.")
         if self.pricing_tier.product_variant != self.item.product_variant:
             raise ValidationError("The pricing tier must belong to the same product variant as the item.")
-        if self.unit_type != self.pricing_tier.tier_type:
-            raise ValidationError("The unit type must match the pricing tier type (pack or pallet).")
-        if self.item.product_variant.show_units_per == 'pack' and self.unit_type != 'pack':
-            raise ValidationError("This item only supports 'pack' unit type.")
-        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type != 'pallet':
-            raise ValidationError("This item only supports 'pallet' unit type.")
+        if self.item.product_variant.show_units_per == 'pack' and self.unit_type == 'pallet':
+            raise ValidationError("This item only supports pack pricing, not pallet pricing.")
+        if self.item.product_variant.show_units_per == 'pallet' and self.unit_type == 'pack':
+            raise ValidationError("This item only supports pallet pricing, not pack pricing.")
+
+        # Calculate total units
+        total_units = self.total_units
+        units_per_pack = self.item.product_variant.units_per_pack
+        units_per_pallet = self.item.product_variant.units_per_pallet
+
+        # Validate quantity against pricing tier range based on unit type
+        if self.unit_type == 'pack':
+            if self.pricing_tier.tier_type == 'pallet':
+                # Allow pallet pricing tier with pack unit type, convert quantity to equivalent packs
+                pass
+            else:  # pack tier
+                if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+                    raise ValidationError(
+                        f"The quantity {self.quantity} exceeds the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                    )
+                if self.quantity < self.pricing_tier.range_start:
+                    raise ValidationError(
+                        f"The quantity {self.quantity} is below the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                    )
+        else:  # pallet
+            if self.pricing_tier.tier_type != 'pallet':
+                raise ValidationError("Pricing tier must be of type 'pallet' when unit type is 'pallet'.")
+            if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
+                raise ValidationError(
+                    f"The pallet quantity {self.quantity} exceeds the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                )
+            if self.quantity < self.pricing_tier.range_start:
+                raise ValidationError(
+                    f"The pallet quantity {self.quantity} is below the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                )
+
+        # Validate per_unit_price, per_pack_price, and total_cost against PricingTierData
+        pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
+        if not pricing_data:
+            raise ValidationError("No pricing data found for this item and pricing tier.")
+        expected_per_unit_price = pricing_data.price
+        expected_per_pack_price = expected_per_unit_price * Decimal(units_per_pack)
+        
+        if self.per_unit_price != expected_per_unit_price:
+            raise ValidationError(
+                f"The per unit price {self.per_unit_price} does not match the expected price {expected_per_unit_price} "
+                f"from PricingTierData."
+            )
+        
+        if self.per_pack_price != expected_per_pack_price:
+            raise ValidationError(
+                f"The per pack price {self.per_pack_price} does not match the expected price {expected_per_pack_price} "
+                f"(per unit price {expected_per_unit_price} * {units_per_pack} units per pack)."
+            )
+        
+        # Calculate total_cost based on unit type
+        if self.unit_type == 'pack':
+            if self.pricing_tier.tier_type == 'pack':
+                expected_total_cost = expected_per_pack_price * Decimal(self.quantity)
+            else:  # pallet tier with pack unit type
+                # Convert pack quantity to total units and then to equivalent pallets, but use per_pack_price for final cost
+                total_units = Decimal(self.quantity) * Decimal(units_per_pack)
+                equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
+                expected_total_cost = equivalent_pallet_quantity * expected_per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
+        else:  # pallet
+            # Convert pallet quantity to total units
+            total_units = Decimal(self.quantity) * Decimal(units_per_pallet)
+            # Convert total units to equivalent pack quantity
+            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
+            # Calculate total cost using equivalent pack quantity and per_pack_price
+            expected_total_cost = equivalent_pack_quantity * expected_per_pack_price
+        
+        if self.total_cost != expected_total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):
+            raise ValidationError(
+                f"The total cost {self.total_cost} does not match the expected total cost {expected_total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)} "
+                f"for {self.unit_type} with quantity {self.quantity}."
+            )
+
+        # Validate stock
         if self.item.track_inventory:
-            total_units = self.total_units
             if self.item.stock is None or total_units > self.item.stock:
-                raise ValidationError(f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units.")
-        if not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
-            raise ValidationError(
-                f"The quantity {self.quantity} exceeds the pricing tier range "
-                f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
-            )
-        if self.quantity < self.pricing_tier.range_start:
-            raise ValidationError(
-                f"The quantity {self.quantity} is below the pricing tier range "
-                f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
-            )
-        if self.user_exclusive_price and (self.user_exclusive_price.item != self.item or self.user_exclusive_price.user != self.order.user):
-            raise ValidationError("The user exclusive price must correspond to the selected item and order user.")
+                raise ValidationError(
+                    f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0}, Required: {total_units} units."
+                )
+
+        # Validate user_exclusive_price
+        if self.user_exclusive_price:
+            if self.user_exclusive_price.item != self.item:
+                raise ValidationError("User exclusive price must correspond to the selected item.")
+            if self.user_exclusive_price.user != self.order.user:
+                raise ValidationError("User exclusive price must correspond to the order's user.")
+
+    def subtotal(self):
+        """Calculate the subtotal for this order item, including discounts."""
+        if not self.total_cost or not self.quantity:
+            return Decimal('0.00')
+        # Apply discount to total_cost
+        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        discounted_subtotal = self.total_cost * (Decimal('1.00') - discount)
+        return discounted_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
-
-    def subtotal(self):
-        """Calculate the subtotal for this order item, including discounts."""
-        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        discounted_price = self.unit_price * (Decimal('1.00') - discount)
-        subtotal = discounted_price * Decimal(self.quantity)
-        return subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def __str__(self):
         return f"{self.item} in order {self.order} ({self.quantity} {self.unit_type})"

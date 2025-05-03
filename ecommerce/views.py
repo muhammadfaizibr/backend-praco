@@ -12,7 +12,7 @@ from ecommerce.serializers import (
     CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer,
     PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer,
     ItemImageSerializer, ItemDataSerializer, UserExclusivePriceSerializer,
-    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer
+    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer
 )
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
 from django.db.models import Q
@@ -445,11 +445,18 @@ class CartViewSet(viewsets.ModelViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
 class CartItemViewSet(viewsets.ModelViewSet):
     queryset = CartItem.objects.all()
-    serializer_class = CartItemSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        """
+        Use CartItemDetailSerializer for read operations (GET),
+        and CartItemSerializer for write operations (POST/PATCH).
+        """
+        if self.action in ['list', 'retrieve']:
+            return CartItemDetailSerializer
+        return CartItemSerializer
 
     def get_queryset(self):
         """
@@ -471,13 +478,14 @@ class CartItemViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Authentication required to add cart items.")
         try:
             cart, created = Cart.get_or_create_cart(request.user)
-            data = request.data
+            data = request.data.copy()  # Use copy to avoid modifying the original
 
             # Handle both single item and bulk creation
             if isinstance(data, list):
                 serializer = self.get_serializer(data=[{**item, 'cart': cart.id} for item in data], many=True)
             else:
-                serializer = self.get_serializer(data={**data, 'cart': cart.id})
+                data['cart'] = cart.id
+                serializer = self.get_serializer(data=data)
 
             serializer.is_valid(raise_exception=True)
             
@@ -488,6 +496,21 @@ class CartItemViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def update(self, request, *args, **kwargs):
+        """
+        Update a cart item, ensuring all required fields are preserved.
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        data = request.data.copy()  # Use copy to avoid modifying the original
+        data['cart'] = instance.cart.id  # Preserve cart ID
+        data['item'] = instance.item.id  # Preserve item ID
+        serializer = self.get_serializer(instance, data=data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+    
 
 class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all().select_related('user').prefetch_related('items__item', 'items__pricing_tier')

@@ -316,7 +316,7 @@ class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('unit_price', 'user_exclusive_price', 'subtotal')
+    readonly_fields = ('user_exclusive_price', 'subtotal')
 
     def subtotal(self, obj):
         return obj.subtotal() if obj.pk else Decimal('0.00')
@@ -349,7 +349,7 @@ class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('unit_price', 'user_exclusive_price', 'subtotal')
+    readonly_fields = ('user_exclusive_price', 'subtotal')
 
     def subtotal(self, obj):
         return obj.subtotal() if obj.pk else Decimal('0.00')
