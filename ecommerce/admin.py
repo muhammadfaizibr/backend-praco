@@ -1,18 +1,43 @@
-from django.contrib import admin
 from django import forms
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from .models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
 )
-from decimal import Decimal
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at')
     search_fields = ('name', 'slug')
     list_filter = ('created_at',)
     ordering = ('name',)
-    fields = ('name', 'slug', 'description', 'image', 'slider_image')
     prepopulated_fields = {'slug': ('name',)}
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'slug'),
+            'description': 'Core details for the category.'
+        }),
+        ('Details', {
+            'fields': ('description', 'image', 'slider_image'),
+            'description': 'Additional category information and images.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
@@ -22,6 +47,8 @@ class CategoryAdmin(admin.ModelAdmin):
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
     extra = 1
+    fields = ('image', 'created_at')
+    readonly_fields = ('created_at',)
 
     class Media:
         css = {
@@ -35,56 +62,49 @@ class ProductAdmin(admin.ModelAdmin):
     ordering = ('name',)
     inlines = [ProductImageInline]
     prepopulated_fields = {'slug': ('name',)}
+    autocomplete_fields = ['category']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'slug', 'category'),
+            'description': 'Core product details.'
+        }),
+        ('Details', {
+            'fields': ('description', 'is_new'),
+            'description': 'Additional product information.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
-class PricingTierForm(forms.ModelForm):
-    class Meta:
-        model = PricingTier
-        fields = '__all__'
-
-    def clean(self):
-        cleaned_data = super().clean()
-        range_start = cleaned_data.get('range_start')
-        range_end = cleaned_data.get('range_end')
-        no_end_range = cleaned_data.get('no_end_range')
-        tier_type = cleaned_data.get('tier_type')
-        product_variant = cleaned_data.get('product_variant')
-
-        if range_start is None:
-            raise forms.ValidationError("Range start is required and must be a positive integer.")
-        if range_start <= 0:
-            raise forms.ValidationError("Range start must be greater than 0.")
-        if no_end_range:
-            if range_end is not None:
-                raise forms.ValidationError("Range end must be blank when 'No End Range' is checked.")
-        else:
-            if range_end is None:
-                raise forms.ValidationError("Range end is required when 'No End Range' is not checked.")
-            if range_end < range_start:
-                raise forms.ValidationError("Range end must be greater than or equal to range start.")
-
-        # Check for pack tier requirement for pallet tiers
-        if tier_type == 'pallet' and product_variant and product_variant.show_units_per != 'pallet':
-            existing_pack_tiers = PricingTier.objects.filter(
-                product_variant=product_variant,
-                tier_type='pack'
-            ).exclude(id=self.instance.id)
-            if not existing_pack_tiers.exists():
-                raise forms.ValidationError(
-                    "You must create at least one 'pack' pricing tier before adding a 'pallet' pricing tier, "
-                    "unless 'Show Units Per' is set to 'Pallet Only'."
-                )
-
-        return cleaned_data
-
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 1
-    form = PricingTierForm
+    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range')
+    autocomplete_fields = ['product_variant']
+
+    def get_formset(self, request, obj=None, **kwargs):
+        if obj is None or not obj.pk:
+            kwargs['form'] = forms.ModelForm
+        return super().get_formset(request, obj, **kwargs)
 
     class Media:
         css = {
@@ -96,17 +116,74 @@ class PricingTierAdmin(admin.ModelAdmin):
     search_fields = ('product_variant__name', 'tier_type')
     list_filter = ('tier_type', 'no_end_range', 'created_at')
     ordering = ('product_variant', 'tier_type', 'range_start')
-    form = PricingTierForm
     autocomplete_fields = ['product_variant']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('product_variant', 'tier_type'),
+            'description': 'Core pricing tier details.'
+        }),
+        ('Range Details', {
+            'fields': ('range_start', 'range_end', 'no_end_range'),
+            'classes': ('inline-group',),
+            'description': 'Specify the quantity range for this tier.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
+class ProductVariantForm(forms.ModelForm):
+    class Meta:
+        model = ProductVariant
+        exclude = ('created_at', 'status')
+
+class TableFieldForm(forms.ModelForm):
+    class Meta:
+        model = TableField
+        fields = '__all__'
+
+    def clean_name(self):
+        name = self.cleaned_data.get('name')
+        if name and name.lower() in TableField.RESERVED_NAMES:
+            raise ValidationError(f"The name '{name}' is reserved and cannot be used.")
+        return name
+
+    def clean_field_type(self):
+        field_type = self.cleaned_data.get('field_type')
+        valid_types = [choice[0] for choice in TableField.FIELD_TYPES]
+        if field_type and field_type not in valid_types:
+            raise ValidationError(f"Field type must be one of: {', '.join(valid_types)}.")
+        return field_type
+
 class TableFieldInline(admin.TabularInline):
     model = TableField
     extra = 1
+    form = TableFieldForm
+    fields = ('name', 'field_type', 'long_field')
+    autocomplete_fields = ['product_variant']
+
+    def get_formset(self, request, obj=None, **kwargs):
+        if obj is None or not obj.pk:
+            kwargs['form'] = forms.ModelForm
+        return super().get_formset(request, obj, **kwargs)
 
     def has_change_permission(self, request, obj=None):
         if obj and obj.name in TableField.RESERVED_NAMES:
@@ -122,140 +199,174 @@ class TableFieldInline(admin.TabularInline):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+class ProductVariantAdmin(admin.ModelAdmin):
+    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at')
+    search_fields = ('name', 'product__name')
+    list_filter = ('status', 'show_units_per', 'created_at')
+    ordering = ('product', 'name')
+    inlines = [PricingTierInline, TableFieldInline]
+    form = ProductVariantForm
+    autocomplete_fields = ['product']
+    readonly_fields = ('status', 'created_at')
 
-class ProductVariantForm(forms.ModelForm):
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('product', 'name'),
+            'description': 'Core variant details.'
+        }),
+        ('Unit Details', {
+            'fields': ('show_units_per', 'units_per_pack', 'units_per_pallet'),
+            'classes': ('inline-group',),
+            'description': 'Specify unit configuration for packs and pallets.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def get_inlines(self, request, obj):
+        if obj is None or not obj.pk:
+            return []
+        return [PricingTierInline, TableFieldInline]
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    def save_related(self, request, form, formsets, change):
+        try:
+            super().save_related(request, form, formsets, change)
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+        js = ('admin/js/product_variant_admin.js',)
+
+class PricingTierDataAdmin(admin.ModelAdmin):
+    list_display = ('item', 'pricing_tier', 'price', 'created_at')
+    search_fields = ('item__sku', 'pricing_tier__product_variant__name')
+    list_filter = ('created_at',)
+    ordering = ('item', 'pricing_tier')
+    autocomplete_fields = ['item', 'pricing_tier']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('item', 'pricing_tier', 'price'),
+            'description': 'Pricing data details.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class TableFieldAdmin(admin.ModelAdmin):
+    list_display = ('name', 'product_variant', 'field_type', 'long_field', 'created_at')
+    search_fields = ('name', 'product_variant__name')
+    list_filter = ('field_type', 'long_field', 'created_at')
+    ordering = ('product_variant', 'name')
+    form = TableFieldForm
+    autocomplete_fields = ['product_variant']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('product_variant', 'name'),
+            'description': 'Core table field details.'
+        }),
+        ('Field Details', {
+            'fields': ('field_type', 'long_field'),
+            'classes': ('inline-group',),
+            'description': 'Specify field type and display options.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+class ItemForm(forms.ModelForm):
     class Meta:
-        model = ProductVariant
-        fields = '__all__'
+        model = Item
+        fields = [
+            'product_variant', 'title', 'sku', 'is_physical_product',
+            'weight', 'weight_unit', 'track_inventory', 'stock',
+            'height', 'width', 'length', 'measurement_unit'
+        ]
+        exclude = ('status', 'created_at')
 
     def clean(self):
         cleaned_data = super().clean()
-        show_units_per = cleaned_data.get('show_units_per')
-
-        tier_types = []
-        valid_tiers = []
-        total_forms = int(self.data.get('pricing_tiers-TOTAL_FORMS', 0))
-        for i in range(total_forms):
-            if f'pricing_tiers-{i}-DELETE' in self.data and self.data[f'pricing_tiers-{i}-DELETE'] == 'on':
-                continue
-            tier_type = self.data.get(f'pricing_tiers-{i}-tier_type')
-            range_start = self.data.get(f'pricing_tiers-{i}-range_start')
-            range_end = self.data.get(f'pricing_tiers-{i}-range_end')
-            no_end_range = self.data.get(f'pricing_tiers-{i}-no_end_range') == 'on'
-
-            if not tier_type or not range_start:
-                continue
-
-            try:
-                range_start = int(range_start)
-                if range_start <= 0:
-                    raise ValueError
-            except (ValueError, TypeError):
-                raise forms.ValidationError(
-                    f"Pricing tier {i+1}: Range start must be a positive integer."
-                )
-
-            if not no_end_range and range_end:
-                try:
-                    range_end = int(range_end)
-                    if range_end < range_start:
-                        raise forms.ValidationError(
-                            f"Pricing tier {i+1}: Range end must be greater than or equal to range start."
-                        )
-                except (ValueError, TypeError):
-                    raise forms.ValidationError(
-                        f"Pricing tier {i+1}: Range end must be a valid integer."
-                    )
-            elif not no_end_range and not range_end:
-                raise forms.ValidationError(
-                    f"Pricing tier {i+1}: Range end is required when 'No End Range' is not checked."
-                )
-            elif no_end_range and range_end:
-                raise forms.ValidationError(
-                    f"Pricing tier {i+1}: Range end must be blank when 'No End Range' is checked."
-                )
-
-            tier_types.append(tier_type)
-            valid_tiers.append({
-                'tier_type': tier_type,
-                'range_start': range_start,
-                'range_end': None if no_end_range else range_end,
-                'no_end_range': no_end_range
+        product_variant = cleaned_data.get('product_variant')
+        if not product_variant:
+            raise ValidationError({
+                'product_variant': ["Please select a product variant for the item."]
             })
-
-        if not valid_tiers:
-            raise forms.ValidationError("At least one valid Pricing Tier is required for a Product Variant.")
-
-        pack_tiers = [tier for tier in valid_tiers if tier['tier_type'] == 'pack']
-        pallet_tiers = [tier for tier in valid_tiers if tier['tier_type'] == 'pallet']
-
-        if show_units_per == 'pack':
-            if not pack_tiers:
-                raise forms.ValidationError("At least one 'pack' Pricing Tier is required when show_units_per is 'pack'.")
-            if pallet_tiers:
-                raise forms.ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
-            pack_no_end = [tier for tier in pack_tiers if tier['no_end_range']]
-            if len(pack_no_end) != 1:
-                raise forms.ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked when show_units_per is 'pack'.")
-        elif show_units_per == 'pallet':
-            if not pallet_tiers:
-                raise forms.ValidationError("At least one 'pallet' Pricing Tier is required when show_units_per is 'pallet'.")
-            if pack_tiers:
-                raise forms.ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
-            pallet_no_end = [tier for tier in pallet_tiers if tier['no_end_range']]
-            if len(pallet_no_end) != 1:
-                raise forms.ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'pallet'.")
-        elif show_units_per == 'both':
-            if not pack_tiers or not pallet_tiers:
-                raise forms.ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required when show_units_per is 'both'.")
-            pack_no_end = [tier for tier in pack_tiers if tier['no_end_range']]
-            pallet_no_end = [tier for tier in pallet_tiers if tier['no_end_range']]
-            if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
-                raise forms.ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked when show_units_per is 'both'.")
-
+        if self.instance.pk:
+            cleaned_data['status'] = self.instance.status
+        else:
+            cleaned_data['status'] = 'draft'
         return cleaned_data
-
-class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'units_per_pack', 'units_per_pallet', 'show_units_per', 'created_at')
-    search_fields = ('name', 'product__name')
-    list_filter = ('product', 'show_units_per', 'created_at')
-    ordering = ('name',)
-    inlines = [PricingTierInline, TableFieldInline]
-    form = ProductVariantForm
-    search_fields = ['name', 'product__name']
-
-    def save_related(self, request, form, formsets, change):
-        super().save_related(request, form, formsets, change)
-        obj = form.instance
-        obj.validate_pricing_tiers()
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
-
+    
 class PricingTierDataInline(admin.TabularInline):
     model = PricingTierData
     extra = 1
-
-    def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        if db_field.name == 'pricing_tier':
-            item_id = request.resolver_match.kwargs.get('object_id')
-            if item_id:
-                item = Item.objects.get(pk=item_id)
-                product_variant = item.product_variant
-                kwargs['queryset'] = PricingTier.objects.filter(product_variant=product_variant)
-        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+    fields = ('pricing_tier', 'price')
+    autocomplete_fields = ['pricing_tier']
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-        js = ('admin/js/filter_pricing_tier.js',)
 
 class ItemImageInline(admin.TabularInline):
     model = ItemImage
     extra = 1
+    fields = ('image', 'created_at')
+    readonly_fields = ('created_at',)
 
     class Media:
         css = {
@@ -265,47 +376,192 @@ class ItemImageInline(admin.TabularInline):
 class ItemDataInline(admin.TabularInline):
     model = ItemData
     extra = 1
-
-    def formfield_for_foreignkey(self, db_field, request, **kwargs):
-        if db_field.name == 'field':
-            item_id = request.resolver_match.kwargs.get('object_id')
-            if item_id:
-                item = Item.objects.get(pk=item_id)
-                product_variant = item.product_variant
-                kwargs['queryset'] = TableField.objects.filter(product_variant=product_variant)
-        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+    fields = ('field', 'value_text', 'value_number', 'value_image')
+    autocomplete_fields = ['field']
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-        js = ('admin/js/filter_item_data.js',)
+
 
 class ItemAdmin(admin.ModelAdmin):
-    list_display = (
-        'sku', 'product_variant', 'is_physical_product', 'status',
-        'height', 'width', 'length', 'measurement_unit', 'created_at'
-    )
+    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at')
     search_fields = ('sku', 'product_variant__name')
-    list_filter = (
-        'product_variant', 'is_physical_product', 'status', 'measurement_unit', 'created_at'
-    )
-    ordering = ('sku',)
-    inlines = [PricingTierDataInline, ItemImageInline, ItemDataInline]
+    list_filter = ('status', 'is_physical_product', 'track_inventory', 'created_at')
+    ordering = ('sku', 'product_variant')
+    form = ItemForm
     autocomplete_fields = ['product_variant']
+    readonly_fields = ('status', 'created_at', 'height_in_inches', 'width_in_inches', 'length_in_inches')
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('product_variant', 'title', 'sku'),
+            'description': 'Core item details.'
+        }),
+        ('Physical Product Details', {
+            'fields': ('is_physical_product', 'weight', 'weight_unit'),
+            'classes': ('inline-group',),
+            'description': 'Specify details for physical products.'
+        }),
+        ('Inventory Management', {
+            'fields': ('track_inventory', 'stock'),
+            'classes': ('inline-group',),
+            'description': 'Configure inventory tracking options.'
+        }),
+        ('Dimensions', {
+            'fields': ('height', 'width', 'length', 'measurement_unit', 'height_in_inches', 'width_in_inches', 'length_in_inches'),
+            'classes': ('inline-group',),
+            'description': 'Required for categories like Box, Postal, or Bag. Dimensions in inches are calculated automatically.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def get_inlines(self, request, obj):
+        if obj is None or not obj.pk:
+            return []
+        return [PricingTierDataInline, ItemImageInline, ItemDataInline]
+
+    def save_model(self, request, obj, form, change):
+        try:
+            if not form.is_valid():
+                return  # Form validation will handle errors
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    def save_related(self, request, form, formsets, change):
+        try:
+            if not form.is_valid():
+                return  # Ensure form is valid before saving related
+            super().save_related(request, form, formsets, change)
+            obj = form.instance
+            pricing_tiers = obj.product_variant.pricing_tiers.all()
+            existing_pricing_data = set(obj.pricing_tier_data.values_list('pricing_tier_id', flat=True))
+            if all(tier.id in existing_pricing_data for tier in pricing_tiers):
+                obj.status = 'active'
+            else:
+                obj.status = 'draft'
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-        js = ('admin/js/filter_pricing_tier.js', 'admin/js/filter_item_data.js',)
+
+class ItemImageAdmin(admin.ModelAdmin):
+    list_display = ('item', 'image', 'created_at')
+    search_fields = ('item__sku',)
+    list_filter = ('created_at',)
+    ordering = ('item', 'created_at')
+    autocomplete_fields = ['item']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('item', 'image'),
+            'description': 'Core image details.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class ItemDataAdmin(admin.ModelAdmin):
+    list_display = ('item', 'field', 'value_text', 'value_number', 'value_image', 'created_at')
+    search_fields = ('item__sku', 'field__name')
+    list_filter = ('field__field_type', 'created_at')
+    ordering = ('item', 'field')
+    autocomplete_fields = ['item', 'field']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('item', 'field'),
+            'description': 'Core data details.'
+        }),
+        ('Values', {
+            'fields': ('value_text', 'value_number', 'value_image'),
+            'classes': ('inline-group',),
+            'description': 'Specify the value based on the field type.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 class UserExclusivePriceAdmin(admin.ModelAdmin):
     list_display = ('user', 'item', 'discount_percentage', 'created_at')
     search_fields = ('user__email', 'item__sku')
     list_filter = ('created_at',)
-    ordering = ('user',)
+    ordering = ('user', 'item')
     autocomplete_fields = ['user', 'item']
+    readonly_fields = ('created_at',)
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('user', 'item', 'discount_percentage'),
+            'description': 'Core discount details.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
@@ -315,12 +571,9 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
+    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost')
+    readonly_fields = ('subtotal', 'total_cost')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('user_exclusive_price', 'subtotal')
-
-    def subtotal(self, obj):
-        return obj.subtotal() if obj.pk else Decimal('0.00')
-    subtotal.short_description = 'Subtotal'
 
     class Media:
         css = {
@@ -328,17 +581,86 @@ class CartItemInline(admin.TabularInline):
         }
 
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('user', 'created_at', 'calculate_total')
+    list_display = ('user', 'subtotal', 'vat', 'discount', 'total', 'created_at', 'updated_at')
     search_fields = ('user__email',)
-    list_filter = ('created_at',)
-    ordering = ('user',)
+    list_filter = ('created_at', 'updated_at')
+    ordering = ('user', 'created_at')
     inlines = [CartItemInline]
-    readonly_fields = ('created_at', 'calculate_total')
-    autocomplete_fields = ['user']
+    readonly_fields = ('subtotal', 'total', 'created_at', 'updated_at')
 
-    def calculate_total(self, obj):
-        return obj.calculate_total()
-    calculate_total.short_description = 'Total'
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('user',),
+            'description': 'Core cart details.'
+        }),
+        ('Pricing Details', {
+            'fields': ('subtotal', 'vat', 'discount', 'total'),
+            'classes': ('inline-group',),
+            'description': 'Cart pricing information.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    def save_related(self, request, form, formsets, change):
+        try:
+            super().save_related(request, form, formsets, change)
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class CartItemAdmin(admin.ModelAdmin):
+    list_display = ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'created_at')
+    search_fields = ('cart__user__email', 'item__sku', 'pricing_tier__product_variant__name')
+    list_filter = ('unit_type', 'created_at', 'updated_at')
+    ordering = ('cart', 'item')
+    autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
+    readonly_fields = ('subtotal', 'total_cost', 'created_at', 'updated_at')
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('cart', 'item', 'pricing_tier'),
+            'description': 'Core cart item details.'
+        }),
+        ('Quantity and Pricing', {
+            'fields': ('quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost'),
+            'classes': ('inline-group',),
+            'description': 'Specify quantity and pricing details.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
@@ -348,12 +670,9 @@ class CartAdmin(admin.ModelAdmin):
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
+    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost')
+    readonly_fields = ('total_cost',)
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('user_exclusive_price', 'subtotal')
-
-    def subtotal(self, obj):
-        return obj.subtotal() if obj.pk else Decimal('0.00')
-    subtotal.short_description = 'Subtotal'
 
     class Media:
         css = {
@@ -361,21 +680,86 @@ class OrderItemInline(admin.TabularInline):
         }
 
 class OrderAdmin(admin.ModelAdmin):
-    list_display = (
-        'id', 'user', 'status', 'total_amount', 'payment_status',
-        'payment_method', 'created_at'
-    )
+    list_display = ('id', 'user', 'status', 'total_amount', 'payment_status', 'created_at')
     search_fields = ('user__email', 'transaction_id')
-    list_filter = ('status', 'payment_status', 'payment_method', 'created_at')
+    list_filter = ('status', 'payment_status', 'created_at')
     ordering = ('-created_at',)
     inlines = [OrderItemInline]
-    readonly_fields = ('created_at', 'total_amount')
     autocomplete_fields = ['user']
-    list_editable = ('status', 'payment_status', 'payment_method')
+    readonly_fields = ('total_amount', 'created_at')
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('user', 'status', 'payment_status'),
+            'description': 'Core order details.'
+        }),
+        ('Details', {
+            'fields': ('total_amount', 'shipping_address', 'payment_method', 'transaction_id'),
+            'description': 'Order and payment information.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     def save_related(self, request, form, formsets, change):
-        super().save_related(request, form, formsets, change)
-        form.instance.calculate_total()
+        try:
+            super().save_related(request, form, formsets, change)
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
+class OrderItemAdmin(admin.ModelAdmin):
+    list_display = ('order', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'created_at')
+    search_fields = ('order__user__email', 'item__sku', 'pricing_tier__product_variant__name')
+    list_filter = ('unit_type', 'created_at')
+    ordering = ('order', 'item')
+    autocomplete_fields = ['order', 'item', 'pricing_tier', 'user_exclusive_price']
+    readonly_fields = ('total_cost', 'created_at')
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('order', 'item', 'pricing_tier'),
+            'description': 'Core order item details.'
+        }),
+        ('Quantity and Pricing', {
+            'fields': ('quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost'),
+            'classes': ('inline-group',),
+            'description': 'Specify quantity and pricing details.'
+        }),
+        ('Metadata', {
+            'fields': (),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        try:
+            obj.save()
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
 
     class Media:
         css = {
@@ -384,9 +768,16 @@ class OrderAdmin(admin.ModelAdmin):
 
 admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)
+admin.site.register(ProductImage)
 admin.site.register(ProductVariant, ProductVariantAdmin)
 admin.site.register(PricingTier, PricingTierAdmin)
+admin.site.register(PricingTierData, PricingTierDataAdmin)
+admin.site.register(TableField, TableFieldAdmin)
 admin.site.register(Item, ItemAdmin)
+admin.site.register(ItemImage, ItemImageAdmin)
+admin.site.register(ItemData, ItemDataAdmin)
 admin.site.register(UserExclusivePrice, UserExclusivePriceAdmin)
 admin.site.register(Cart, CartAdmin)
+admin.site.register(CartItem, CartItemAdmin)
 admin.site.register(Order, OrderAdmin)
+admin.site.register(OrderItem, OrderItemAdmin)

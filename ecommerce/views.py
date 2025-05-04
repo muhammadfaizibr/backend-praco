@@ -127,7 +127,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         return context
 
 class ProductVariantViewSet(viewsets.ModelViewSet):
-    queryset = ProductVariant.objects.all().select_related('product').prefetch_related('pricing_tiers__pricing_data')
+    queryset = ProductVariant.objects.filter(status="active").select_related('product').prefetch_related('pricing_tiers__pricing_data')
     serializer_class = ProductVariantSerializer
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
@@ -445,6 +445,7 @@ class CartViewSet(viewsets.ModelViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 class CartItemViewSet(viewsets.ModelViewSet):
     queryset = CartItem.objects.all()
     permission_classes = [IsAuthenticated]

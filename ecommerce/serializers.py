@@ -50,13 +50,15 @@ class PricingTierSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Range end must be null when 'No End Range' is checked.")
         if not no_end_range and range_end is None:
             raise serializers.ValidationError("Range end is required when 'No End Range' is not checked.")
+        if not product_variant:
+            raise serializers.ValidationError("Product variant is required.")
 
         if product_variant:
             show_units_per = product_variant.show_units_per
             if show_units_per == 'pack' and tier_type != 'pack':
-                raise serializers.ValidationError("When show_units_per is 'pack', tier_type must be 'pack'.")
-            if show_units_per == 'pallet' and tier_type != 'pallet':
-                raise serializers.ValidationError("When show_units_per is 'pallet', tier_type must be 'pallet'.")
+                raise serializers.ValidationError("Tier type must be 'pack' when show_units_per is 'Pack'.")
+            if show_units_per == 'both' and tier_type not in ['pack', 'pallet']:
+                raise serializers.ValidationError("Tier type must be 'pack' or 'pallet' when show_units_per is 'Both'.")
 
         return data
 
@@ -73,30 +75,38 @@ class ProductVariantSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         show_units_per = data.get('show_units_per')
-        if self.instance:
+        units_per_pack = data.get('units_per_pack', 6)
+        units_per_pallet = data.get('units_per_pallet', 0)
+
+        if show_units_per == 'both' and units_per_pallet <= units_per_pack:
+            raise serializers.ValidationError("Units per pallet must be greater than units per pack when show_units_per is 'Both'.")
+        if show_units_per == 'pack' and units_per_pallet != 0:
+            raise serializers.ValidationError("Units per pallet must be 0 when show_units_per is 'Pack'.")
+
+        if self.instance and self.instance.pk:
             pricing_tiers = self.instance.pricing_tiers.all()
             pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
             pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
 
             if show_units_per == 'pack':
+                if not pack_tiers:
+                    raise serializers.ValidationError("At least one 'pack' pricing tier is required when show_units_per is 'Pack'.")
                 if pallet_tiers:
-                    raise serializers.ValidationError("Pallet Pricing Tiers are not allowed when show_units_per is 'pack'.")
+                    raise serializers.ValidationError("Pallet pricing tiers are not allowed when show_units_per is 'Pack'.")
                 pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
                 if len(pack_no_end) != 1:
-                    raise serializers.ValidationError("Exactly one 'pack' Pricing Tier must have 'No End Range' checked.")
-            elif show_units_per == 'pallet':
-                if pack_tiers:
-                    raise serializers.ValidationError("Pack Pricing Tiers are not allowed when show_units_per is 'pallet'.")
-                pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
-                if len(pallet_no_end) != 1:
-                    raise serializers.ValidationError("Exactly one 'pallet' Pricing Tier must have 'No End Range' checked.")
+                    raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
             elif show_units_per == 'both':
-                if not pack_tiers or not pallet_tiers:
-                    raise serializers.ValidationError("At least one 'pack' and one 'pallet' Pricing Tier are required.")
+                if not pack_tiers:
+                    raise serializers.ValidationError("At least one 'pack' pricing tier is required when show_units_per is 'Both'.")
+                if not pallet_tiers:
+                    raise serializers.ValidationError("At least one 'pallet' pricing tier is required when show_units_per is 'Both'.")
                 pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
                 pallet_no_end = [tier for tier in pallet_tiers if tier.no_end_range]
-                if len(pack_no_end) != 1 or len(pallet_no_end) != 1:
-                    raise serializers.ValidationError("Exactly one 'pack' and one 'pallet' Pricing Tier must have 'No End Range' checked.")
+                if len(pack_no_end) != 1:
+                    raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
+                if len(pallet_no_end) != 1:
+                    raise serializers.ValidationError("Exactly one 'pallet' pricing tier must have 'No End Range' checked.")
 
         return data
 
@@ -108,6 +118,11 @@ class TableFieldSerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         if value.lower() in TableField.RESERVED_NAMES:
             raise serializers.ValidationError(f"Field name '{value}' is reserved and cannot be used.")
+        return value
+
+    def validate_field_type(self, value):
+        if value not in [choice[0] for choice in TableField.FIELD_TYPES]:
+            raise serializers.ValidationError(f"Field type must be one of: {', '.join([choice[0] for choice in TableField.FIELD_TYPES])}.")
         return value
 
 class ItemImageSerializer(serializers.ModelSerializer):
@@ -141,24 +156,19 @@ class ItemDataSerializer(serializers.ModelSerializer):
 
         if field.field_type == 'text':
             if value_text is None:
-                raise serializers.ValidationError("A non-empty value_text is required for a text field.")
+                raise serializers.ValidationError(f"Provide a value for the text field '{field.name}'.")
             if value_number is not None or value_image:
-                raise serializers.ValidationError("For a text field, only value_text should be provided.")
+                raise serializers.ValidationError(f"Field '{field.name}' only accepts text values.")
         elif field.field_type == 'number':
             if value_number is None:
-                raise serializers.ValidationError("A non-empty value_number is required for a number field.")
+                raise serializers.ValidationError(f"Provide a number for the field '{field.name}'.")
             if value_text is not None or value_image:
-                raise serializers.ValidationError("For a number field, only value_number should be provided.")
-        elif field.field_type == 'price':
-            if value_number is None or value_number < 0:
-                raise serializers.ValidationError("A non-negative value_number is required for a price field.")
-            if value_text is not None or value_image:
-                raise serializers.ValidationError("For a price field, only value_number should be provided.")
+                raise serializers.ValidationError(f"Field '{field.name}' only accepts number values.")
         elif field.field_type == 'image':
             if not value_image:
-                raise serializers.ValidationError("A non-empty value_image is required for an image field.")
+                raise serializers.ValidationError(f"Upload an image for the field '{field.name}'.")
             if value_text is not None or value_number is not None:
-                raise serializers.ValidationError("For an image field, only value_image should be provided.")
+                raise serializers.ValidationError(f"Field '{field.name}' only accepts image values.")
 
         data['value_text'] = value_text
         data['value_number'] = value_number
@@ -242,12 +252,7 @@ class UserExclusivePriceSerializer(serializers.ModelSerializer):
         model = UserExclusivePrice
         fields = ['id', 'user', 'item', 'discount_percentage', 'created_at']
 
-
 class CartItemSerializer(serializers.ModelSerializer):
-    """
-    Serializer for CartItem, used for write operations (POST/PATCH).
-    Accepts flat IDs for related fields.
-    """
     cart = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
     item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all())
     pricing_tier = serializers.PrimaryKeyRelatedField(queryset=PricingTier.objects.all())
@@ -255,14 +260,19 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
-        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'total_cost']  # Calculated in validate
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at']
+        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost']
 
     def validate(self, data):
-        """
-        Calculate per_unit_price, per_pack_price, and total_cost.
-        """
-        instance = CartItem(**data)
+        instance_data = {
+            'cart': data.get('cart'),
+            'item': data.get('item'),
+            'pricing_tier': data.get('pricing_tier'),
+            'quantity': data.get('quantity'),
+            'unit_type': data.get('unit_type'),
+            'user_exclusive_price': data.get('user_exclusive_price'),
+        }
+        instance = CartItem(**instance_data)
 
         pricing_data = PricingTierData.objects.filter(
             pricing_tier=instance.pricing_tier,
@@ -274,18 +284,37 @@ class CartItemSerializer(serializers.ModelSerializer):
         units_per_pack = instance.item.product_variant.units_per_pack
         units_per_pallet = instance.item.product_variant.units_per_pallet
         per_unit_price = pricing_data.price
-        per_pack_price = per_unit_price * units_per_pack
+        per_pack_price = per_unit_price * Decimal(units_per_pack)
+
+        if instance.unit_type == 'pack':
+            if instance.pricing_tier.tier_type == 'pack':
+                subtotal = per_pack_price * Decimal(instance.quantity)
+            else:
+                total_units = Decimal(instance.quantity) * Decimal(units_per_pack)
+                equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
+                subtotal = equivalent_pallet_quantity * per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
+        else:
+            total_units = Decimal(instance.quantity) * Decimal(units_per_pallet)
+            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
+            subtotal = equivalent_pack_quantity * per_pack_price
+        subtotal = subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        discount_percentage = instance.user_exclusive_price.discount_percentage if instance.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        total_cost = subtotal * (Decimal('1.00') - discount)
+        total_cost = total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         data['per_unit_price'] = per_unit_price
         data['per_pack_price'] = per_pack_price
-
-        if instance.unit_type == 'pack':
-            total_cost = per_pack_price * Decimal(instance.quantity)
-        else:  # pallet
-            total_units = Decimal(instance.quantity) * Decimal(units_per_pallet)
-            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
-            total_cost = equivalent_pack_quantity * per_pack_price
+        data['subtotal'] = subtotal
         data['total_cost'] = total_cost
+
+        self.context['calculated_fields'] = {
+            'per_unit_price': per_unit_price,
+            'per_pack_price': per_pack_price,
+            'subtotal': subtotal,
+            'total_cost': total_cost,
+        }
 
         if instance.quantity <= 0:
             raise serializers.ValidationError("Quantity must be positive.")
@@ -295,8 +324,6 @@ class CartItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
         if instance.item.product_variant.show_units_per == 'pack' and instance.unit_type == 'pallet':
             raise serializers.ValidationError("This item only supports pack pricing, not pallet pricing.")
-        if instance.item.product_variant.show_units_per == 'pallet' and instance.unit_type == 'pack':
-            raise serializers.ValidationError("This item only supports pallet pricing, not pack pricing.")
         if instance.user_exclusive_price:
             if instance.user_exclusive_price.item != instance.item:
                 raise serializers.ValidationError("User exclusive price must correspond to the selected item.")
@@ -308,65 +335,82 @@ class CartItemSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         cart = validated_data['cart']
         item = validated_data['item']
+        pricing_tier = validated_data['pricing_tier']
+        unit_type = validated_data['unit_type']
 
-        existing_cart_item = CartItem.objects.filter(cart=cart, item=item).first()
+        existing_cart_item = CartItem.objects.filter(
+            cart=cart,
+            item=item,
+            pricing_tier=pricing_tier,
+            unit_type=unit_type
+        ).first()
+
+        calculated_fields = self.context.get('calculated_fields', {})
+        per_unit_price = calculated_fields.get('per_unit_price', validated_data.get('per_unit_price'))
+        per_pack_price = calculated_fields.get('per_pack_price', validated_data.get('per_pack_price'))
+        subtotal = calculated_fields.get('subtotal', validated_data.get('subtotal'))
+        total_cost = calculated_fields.get('total_cost', validated_data.get('total_cost'))
 
         if existing_cart_item:
-            existing_cart_item.quantity = validated_data['quantity']
-            existing_cart_item.pricing_tier = validated_data['pricing_tier']
-            existing_cart_item.unit_type = validated_data['unit_type']
-            existing_cart_item.per_unit_price = validated_data['per_unit_price']
-            existing_cart_item.per_pack_price = validated_data['per_pack_price']
-            existing_cart_item.total_cost = validated_data['total_cost']
+            existing_cart_item.quantity += validated_data['quantity']
+            existing_cart_item.per_unit_price = per_unit_price
+            existing_cart_item.per_pack_price = per_pack_price
+            existing_cart_item.subtotal = subtotal
+            existing_cart_item.total_cost = total_cost
             existing_cart_item.user_exclusive_price = validated_data.get('user_exclusive_price')
             existing_cart_item.save()
             return existing_cart_item
         else:
-            return CartItem.objects.create(**validated_data)
+            cart_item = CartItem(
+                cart=cart,
+                item=item,
+                pricing_tier=pricing_tier,
+                quantity=validated_data['quantity'],
+                unit_type=unit_type,
+                per_unit_price=per_unit_price,
+                per_pack_price=per_pack_price,
+                subtotal=subtotal,
+                total_cost=total_cost,
+                user_exclusive_price=validated_data.get('user_exclusive_price')
+            )
+            cart_item.save()
+            return cart_item
 
     def update(self, instance, validated_data):
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
+        calculated_fields = self.context.get('calculated_fields', {})
+        instance.quantity = validated_data.get('quantity', instance.quantity)
+        instance.unit_type = validated_data.get('unit_type', instance.unit_type)
+        instance.per_unit_price = calculated_fields.get('per_unit_price', validated_data.get('per_unit_price', instance.per_unit_price))
+        instance.per_pack_price = calculated_fields.get('per_pack_price', validated_data.get('per_pack_price', instance.per_pack_price))
+        instance.subtotal = calculated_fields.get('subtotal', validated_data.get('subtotal', instance.subtotal))
+        instance.total_cost = calculated_fields.get('total_cost', validated_data.get('total_cost', instance.total_cost))
+        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
         instance.save()
         return instance
 
 class CartItemDetailSerializer(serializers.ModelSerializer):
-    """
-    Serializer for CartItem, used for read operations (GET).
-    Provides nested data with depth = 4.
-    """
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at']
         depth = 4
-
 
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = Cart
-        fields = ['id', 'user', 'items', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
-
+        fields = ['id', 'user', 'items', 'subtotal', 'vat', 'discount', 'total', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'subtotal', 'total', 'created_at', 'updated_at']
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    """
-    Serializer for OrderItem, calculating per_unit_price, per_pack_price, and total_cost.
-    """
     class Meta:
         model = OrderItem
         fields = ['id', 'order', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
-        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'total_cost']  # Calculated in validate
+        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'total_cost']
 
     def validate(self, data):
-        """
-        Calculate per_unit_price, per_pack_price, and total_cost.
-        """
-        # Create a temporary instance to access related fields
         instance = OrderItem(**data)
         
-        # Fetch pricing data
         pricing_data = PricingTierData.objects.filter(
             pricing_tier=instance.pricing_tier,
             item=instance.item
@@ -374,29 +418,23 @@ class OrderItemSerializer(serializers.ModelSerializer):
         if not pricing_data:
             raise serializers.ValidationError("No pricing data found for this item and pricing tier.")
 
-        # Calculate prices
         units_per_pack = instance.item.product_variant.units_per_pack
         units_per_pallet = instance.item.product_variant.units_per_pallet
         per_unit_price = pricing_data.price
-        per_pack_price = per_unit_price * units_per_pack
+        per_pack_price = per_unit_price * Decimal(units_per_pack)
 
-        # Set calculated values in data
-        data['per_unit_price'] = per_unit_price
-        data['per_pack_price'] = per_pack_price
-
-        # Calculate total_cost based on unit type
         if instance.unit_type == 'pack':
             total_cost = per_pack_price * Decimal(instance.quantity)
-        else:  # pallet
-            # Convert pallet quantity to total units
+        else:
             total_units = Decimal(instance.quantity) * Decimal(units_per_pallet)
-            # Convert total units to equivalent pack quantity
             equivalent_pack_quantity = total_units / Decimal(units_per_pack)
-            # Calculate total cost using equivalent pack quantity and per_pack_price
             total_cost = equivalent_pack_quantity * per_pack_price
+        total_cost = total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        data['per_unit_price'] = per_unit_price
+        data['per_pack_price'] = per_pack_price
         data['total_cost'] = total_cost
 
-        # Additional validations
         if instance.quantity <= 0:
             raise serializers.ValidationError("Quantity must be positive.")
         if instance.unit_type not in ['pack', 'pallet']:
@@ -405,8 +443,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
         if instance.item.product_variant.show_units_per == 'pack' and instance.unit_type == 'pallet':
             raise serializers.ValidationError("This item only supports pack pricing, not pallet pricing.")
-        if instance.item.product_variant.show_units_per == 'pallet' and instance.unit_type == 'pack':
-            raise serializers.ValidationError("This item only supports pallet pricing, not pack pricing.")
         if instance.user_exclusive_price:
             if instance.user_exclusive_price.item != instance.item:
                 raise serializers.ValidationError("User exclusive price must correspond to the selected item.")
