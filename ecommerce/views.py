@@ -405,7 +405,6 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
-
 class CartViewSet(viewsets.ModelViewSet):
     queryset = Cart.objects.all()
     serializer_class = CartSerializer
@@ -418,7 +417,7 @@ class CartViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access cart.")
         try:
-            cart, created = Cart.get_or_create_cart(request.user)
+            cart = Cart.get_or_create_cart(request.user)
             serializer = self.get_serializer(cart)
             return Response(serializer.data)
         except ValidationError as e:
@@ -440,7 +439,7 @@ class CartViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to clear cart.")
         try:
-            cart, created = Cart.get_or_create_cart(request.user)
+            cart = Cart.get_or_create_cart(request.user)
             cart.items.all().delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:

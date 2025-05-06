@@ -626,7 +626,6 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
@@ -674,12 +673,12 @@ class CartItemInline(admin.TabularInline):
         }
 
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'total_units', 'total_packs', 'get_total_weight', 'created_at', 'updated_at', 'grok_side_view')
+    list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at', 'grok_side_view')
     search_fields = ('user__email',)
     list_filter = ('created_at', 'updated_at')
     ordering = ('user', 'created_at')
     inlines = [CartItemInline]
-    readonly_fields = ('created_at', 'updated_at', 'get_subtotal', 'get_total', 'total_units', 'total_packs', 'get_total_weight')
+    readonly_fields = ('created_at', 'updated_at', 'get_subtotal', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight')
 
     fieldsets = (
         ('Basic Information', {
@@ -687,7 +686,7 @@ class CartAdmin(admin.ModelAdmin):
             'description': 'Core cart details.'
         }),
         ('Pricing Details', {
-            'fields': ('get_subtotal', 'vat', 'discount', 'get_total', 'total_units', 'total_packs', 'get_total_weight'),
+            'fields': ('get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight'),
             'classes': ('inline-group',),
             'description': 'Pricing, units, weight, and discount information.'
         }),
@@ -709,6 +708,16 @@ class CartAdmin(admin.ModelAdmin):
     def get_total_weight(self, obj):
         return obj.calculate_total_weight()
     get_total_weight.short_description = "Total Weight"
+
+    def get_total_units(self, obj):
+        total_units, _ = obj.calculate_total_units_and_packs()
+        return total_units
+    get_total_units.short_description = "Total Units"
+
+    def get_total_packs(self, obj):
+        _, total_packs = obj.calculate_total_units_and_packs()
+        return total_packs
+    get_total_packs.short_description = "Total Packs"
 
     def save_model(self, request, obj, form, change):
         try:
@@ -806,7 +815,7 @@ class CartItemAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-        
+   
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1

@@ -268,7 +268,7 @@ class CartItemSerializer(serializers.ModelSerializer):
             'cart': data.get('cart'),
             'item': data.get('item'),
             'pricing_tier': data.get('pricing_tier'),
-            'pack_quantity': data.get('pack_quantityness', 1),
+            'pack_quantity': data.get('pack_quantity', 1),
             'unit_type': data.get('unit_type', 'pack'),
             'user_exclusive_price': data.get('user_exclusive_price'),
         }
@@ -331,38 +331,31 @@ class CartItemSerializer(serializers.ModelSerializer):
         return representation
 
     def create(self, validated_data):
-        cart = validated_data['cart']
-        item = validated_data['item']
-        pricing_tier = validated_data['pricing_tier']
+        cart = validated_data.get('cart')
+        item = validated_data.get('item')
+        pricing_tier = validated_data.get('pricing_tier')
         pack_quantity = validated_data.get('pack_quantity', 1)
         unit_type = validated_data.get('unit_type', 'pack')
         user_exclusive_price = validated_data.get('user_exclusive_price')
 
-        existing_cart_item = CartItem.objects.filter(cart=cart, item=item).first()
-        if existing_cart_item:
-            existing_cart_item.pack_quantity = pack_quantity
-            existing_cart_item.pricing_tier = pricing_tier
-            existing_cart_item.unit_type = unit_type
-            existing_cart_item.user_exclusive_price = user_exclusive_price
-            existing_cart_item.save()
-            return existing_cart_item
-        else:
-            cart_item = CartItem(
-                cart=cart,
-                item=item,
-                pricing_tier=pricing_tier,
-                pack_quantity=pack_quantity,
-                unit_type=unit_type,
-                user_exclusive_price=user_exclusive_price
-            )
-            cart_item.save()
-            return cart_item
+        cart_item = CartItem(
+            cart=cart,
+            item=item,
+            pricing_tier=pricing_tier,
+            pack_quantity=pack_quantity,
+            unit_type=unit_type,
+            user_exclusive_price=user_exclusive_price
+        )
+        cart_item.full_clean()  # Trigger model validation
+        cart_item.save()
+        return cart_item
 
     def update(self, instance, validated_data):
         instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
         instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
         instance.unit_type = validated_data.get('unit_type', instance.unit_type)
         instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+        instance.full_clean()  # Trigger model validation
         instance.save()
         return instance
 
@@ -406,15 +399,18 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
-        fields = ['id', 'user', 'items', 'vat', 'discount', 'total_units', 'total_packs', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'user', 'total_units', 'total_packs', 'created_at', 'updated_at']
+        fields = ['id', 'user', 'items', 'vat', 'discount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
+        total_units, total_packs = instance.calculate_total_units_and_packs() if isinstance(instance, Cart) else (0, 0)
         representation.update({
-            'subtotal': instance.calculate_subtotal(),
-            'total': instance.calculate_total(),
-            'total_weight': instance.calculate_total_weight(),
+            'subtotal': instance.calculate_subtotal() if isinstance(instance, Cart) else Decimal('0.00'),
+            'total': instance.calculate_total() if isinstance(instance, Cart) else Decimal('0.00'),
+            'total_weight': instance.calculate_total_weight() if isinstance(instance, Cart) else Decimal('0.00'),
+            'total_units': total_units,
+            'total_packs': total_packs,
         })
         return representation
 

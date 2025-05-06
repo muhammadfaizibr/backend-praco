@@ -855,16 +855,6 @@ class Cart(models.Model):
         default=Decimal('0.00'), 
         help_text="Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR."
     )
-    total_units = models.PositiveIntegerField(
-        editable=False,
-        default=0,
-        help_text="Total number of units across all cart items."
-    )
-    total_packs = models.PositiveIntegerField(
-        editable=False,
-        default=0,
-        help_text="Total number of packs across all cart items."
-    )
 
     class Meta:
         indexes = [
@@ -878,8 +868,7 @@ class Cart(models.Model):
     def get_or_create_cart(cls, user):
         """Retrieve an existing cart for the user or create a new one."""
         cart, created = cls.objects.get_or_create(user=user)
-        return cart
-
+        return cart, created
 
     def calculate_subtotal(self):
         total = Decimal('0.00')
@@ -887,19 +876,8 @@ class Cart(models.Model):
             pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
             if pricing_data:
                 units_per_pack = item.item.product_variant.units_per_pack
-                units_per_pallet = item.item.product_variant.units_per_pallet
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
-                if item.unit_type == 'pack':
-                    if item.pricing_tier.tier_type == 'pack':
-                        total += per_pack_price * Decimal(item.pack_quantity)
-                    else:
-                        total_units = Decimal(item.pack_quantity) * Decimal(units_per_pack)
-                        equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
-                        total += equivalent_pallet_quantity * per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
-                else:
-                    total_units = Decimal(item.pack_quantity) * Decimal(units_per_pallet)
-                    equivalent_pack_quantity = total_units / Decimal(units_per_pack)
-                    total += equivalent_pack_quantity * per_pack_price
+                total += per_pack_price * Decimal(item.pack_quantity)
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total_units_and_packs(self):
@@ -907,15 +885,8 @@ class Cart(models.Model):
         total_packs = 0
         for item in self.items.all():
             units_per_pack = item.item.product_variant.units_per_pack
-            units_per_pallet = item.item.product_variant.units_per_pallet
-            if item.unit_type == 'pack':
-                total_units += item.pack_quantity * units_per_pack
-                total_packs += item.pack_quantity
-            else:
-                total_units += item.pack_quantity * units_per_pallet
-                if units_per_pack > 0:
-                    equivalent_packs = (item.pack_quantity * units_per_pallet) // units_per_pack
-                    total_packs += equivalent_packs
+            total_units += item.pack_quantity * units_per_pack
+            total_packs += item.pack_quantity
         return total_units, total_packs
 
     def calculate_total_weight(self):
@@ -935,7 +906,6 @@ class Cart(models.Model):
 
     def update_cart(self):
         self.discount = Decimal('10.00') if self.calculate_subtotal() > Decimal('600.00') else Decimal('0.00')
-        self.total_units, self.total_packs = self.calculate_total_units_and_packs()
         super().save()
 
     def save(self, *args, **kwargs):
