@@ -29,7 +29,6 @@ urlpatterns = [
     path("ckeditor5/", include('django_ckeditor_5.urls')),
 ]
  
-# product details
 # cart
 # checkout
 # search / adavance search

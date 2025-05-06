@@ -7,7 +7,7 @@ from .models import (
 )
 
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'slug', 'created_at')
+    list_display = ('name', 'slug', 'created_at', 'grok_side_view')
     search_fields = ('name', 'slug')
     list_filter = ('created_at',)
     ordering = ('name',)
@@ -24,7 +24,7 @@ class CategoryAdmin(admin.ModelAdmin):
             'description': 'Additional category information and images.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -38,6 +38,11 @@ class CategoryAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
+
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the category."""
+        return f"{obj.name} (Slug: {obj.slug})"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -56,7 +61,7 @@ class ProductImageInline(admin.TabularInline):
         }
 
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'slug', 'category', 'is_new', 'created_at')
+    list_display = ('name', 'slug', 'category', 'is_new', 'created_at', 'grok_side_view')
     search_fields = ('name', 'category__name')
     list_filter = ('category', 'is_new', 'created_at')
     ordering = ('name',)
@@ -75,7 +80,7 @@ class ProductAdmin(admin.ModelAdmin):
             'description': 'Additional product information.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -90,6 +95,11 @@ class ProductAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the product."""
+        return f"{obj.name} in {obj.category.name}"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
@@ -98,7 +108,8 @@ class ProductAdmin(admin.ModelAdmin):
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 1
-    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range')
+    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
+    readonly_fields = ('created_at',)
     autocomplete_fields = ['product_variant']
 
     def get_formset(self, request, obj=None, **kwargs):
@@ -112,7 +123,7 @@ class PricingTierInline(admin.TabularInline):
         }
 
 class PricingTierAdmin(admin.ModelAdmin):
-    list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
+    list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'grok_side_view')
     search_fields = ('product_variant__name', 'tier_type')
     list_filter = ('tier_type', 'no_end_range', 'created_at')
     ordering = ('product_variant', 'tier_type', 'range_start')
@@ -130,7 +141,7 @@ class PricingTierAdmin(admin.ModelAdmin):
             'description': 'Specify the quantity range for this tier.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -144,6 +155,12 @@ class PricingTierAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
+
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the pricing tier."""
+        range_str = f"{obj.range_start}-{'+' if obj.no_end_range else obj.range_end}"
+        return f"{obj.tier_type.capitalize()} Tier: {range_str}"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -177,7 +194,8 @@ class TableFieldInline(admin.TabularInline):
     model = TableField
     extra = 1
     form = TableFieldForm
-    fields = ('name', 'field_type', 'long_field')
+    fields = ('name', 'field_type', 'long_field', 'created_at')
+    readonly_fields = ('created_at',)
     autocomplete_fields = ['product_variant']
 
     def get_formset(self, request, obj=None, **kwargs):
@@ -199,8 +217,9 @@ class TableFieldInline(admin.TabularInline):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
 class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at')
+    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at', 'grok_side_view')
     search_fields = ('name', 'product__name')
     list_filter = ('status', 'show_units_per', 'created_at')
     ordering = ('product', 'name')
@@ -220,7 +239,7 @@ class ProductVariantAdmin(admin.ModelAdmin):
             'description': 'Specify unit configuration for packs and pallets.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -249,14 +268,31 @@ class ProductVariantAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the product variant."""
+        return f"{obj.name} (Units/Pack: {obj.units_per_pack}, Units/Pallet: {obj.units_per_pallet})"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
         js = ('admin/js/product_variant_admin.js',)
 
+class PricingTierDataInline(admin.TabularInline):
+    model = PricingTierData
+    extra = 1
+    fields = ('pricing_tier', 'price', 'created_at')
+    readonly_fields = ('created_at',)
+    autocomplete_fields = ['pricing_tier']
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 class PricingTierDataAdmin(admin.ModelAdmin):
-    list_display = ('item', 'pricing_tier', 'price', 'created_at')
+    list_display = ('item', 'pricing_tier', 'price', 'created_at', 'grok_side_view')
     search_fields = ('item__sku', 'pricing_tier__product_variant__name')
     list_filter = ('created_at',)
     ordering = ('item', 'pricing_tier')
@@ -269,7 +305,7 @@ class PricingTierDataAdmin(admin.ModelAdmin):
             'description': 'Pricing data details.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -284,13 +320,18 @@ class PricingTierDataAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the pricing tier data."""
+        return f"Price: {obj.price} for {obj.item.sku}"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class TableFieldAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product_variant', 'field_type', 'long_field', 'created_at')
+    list_display = ('name', 'product_variant', 'field_type', 'long_field', 'created_at', 'grok_side_view')
     search_fields = ('name', 'product_variant__name')
     list_filter = ('field_type', 'long_field', 'created_at')
     ordering = ('product_variant', 'name')
@@ -309,7 +350,7 @@ class TableFieldAdmin(admin.ModelAdmin):
             'description': 'Specify field type and display options.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -324,10 +365,16 @@ class TableFieldAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the table field."""
+        return f"{obj.name} ({obj.field_type}, {'Long' if obj.long_field else 'Short'})"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
 class ItemForm(forms.ModelForm):
     class Meta:
         model = Item
@@ -350,17 +397,6 @@ class ItemForm(forms.ModelForm):
         else:
             cleaned_data['status'] = 'draft'
         return cleaned_data
-    
-class PricingTierDataInline(admin.TabularInline):
-    model = PricingTierData
-    extra = 1
-    fields = ('pricing_tier', 'price')
-    autocomplete_fields = ['pricing_tier']
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
 
 class ItemImageInline(admin.TabularInline):
     model = ItemImage
@@ -376,7 +412,8 @@ class ItemImageInline(admin.TabularInline):
 class ItemDataInline(admin.TabularInline):
     model = ItemData
     extra = 1
-    fields = ('field', 'value_text', 'value_number', 'value_image')
+    fields = ('field', 'value_text', 'value_number', 'value_image', 'created_at')
+    readonly_fields = ('created_at',)
     autocomplete_fields = ['field']
 
     class Media:
@@ -384,9 +421,8 @@ class ItemDataInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
-
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at')
+    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at', 'grok_side_view')
     search_fields = ('sku', 'product_variant__name')
     list_filter = ('status', 'is_physical_product', 'track_inventory', 'created_at')
     ordering = ('sku', 'product_variant')
@@ -415,7 +451,7 @@ class ItemAdmin(admin.ModelAdmin):
             'description': 'Required for categories like Box, Postal, or Bag. Dimensions in inches are calculated automatically.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -456,13 +492,18 @@ class ItemAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the item."""
+        return f"{obj.sku} ({obj.title or 'No Title'})"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class ItemImageAdmin(admin.ModelAdmin):
-    list_display = ('item', 'image', 'created_at')
+    list_display = ('item', 'image', 'created_at', 'grok_side_view')
     search_fields = ('item__sku',)
     list_filter = ('created_at',)
     ordering = ('item', 'created_at')
@@ -475,7 +516,7 @@ class ItemImageAdmin(admin.ModelAdmin):
             'description': 'Core image details.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -490,13 +531,18 @@ class ItemImageAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the item image."""
+        return f"Image for {obj.item.sku}"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class ItemDataAdmin(admin.ModelAdmin):
-    list_display = ('item', 'field', 'value_text', 'value_number', 'value_image', 'created_at')
+    list_display = ('item', 'field', 'value_text', 'value_number', 'value_image', 'created_at', 'grok_side_view')
     search_fields = ('item__sku', 'field__name')
     list_filter = ('field__field_type', 'created_at')
     ordering = ('item', 'field')
@@ -514,7 +560,7 @@ class ItemDataAdmin(admin.ModelAdmin):
             'description': 'Specify the value based on the field type.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -529,13 +575,20 @@ class ItemDataAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the item data."""
+        if obj.field.field_type == 'image' and obj.value_image:
+            return f"{obj.field.name}: Image"
+        return f"{obj.field.name}: {obj.value_text or obj.value_number or '-'}"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class UserExclusivePriceAdmin(admin.ModelAdmin):
-    list_display = ('user', 'item', 'discount_percentage', 'created_at')
+    list_display = ('user', 'item', 'discount_percentage', 'created_at', 'grok_side_view')
     search_fields = ('user__email', 'item__sku')
     list_filter = ('created_at',)
     ordering = ('user', 'item')
@@ -548,7 +601,7 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
             'description': 'Core discount details.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -562,6 +615,11 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
+
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the user exclusive price."""
+        return f"{obj.user.email} gets {obj.discount_percentage}% off {obj.item.sku}"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -571,8 +629,8 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
-    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost')
-    readonly_fields = ('subtotal', 'total_cost')
+    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at')
+    readonly_fields = ('created_at', 'subtotal', 'total_cost')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     class Media:
@@ -581,12 +639,12 @@ class CartItemInline(admin.TabularInline):
         }
 
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('user', 'subtotal', 'vat', 'discount', 'total', 'created_at', 'updated_at')
+    list_display = ('user', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at', 'grok_side_view')
     search_fields = ('user__email',)
     list_filter = ('created_at', 'updated_at')
     ordering = ('user', 'created_at')
     inlines = [CartItemInline]
-    readonly_fields = ('subtotal', 'total', 'created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total', 'total_units', 'total_packs')
 
     fieldsets = (
         ('Basic Information', {
@@ -594,12 +652,12 @@ class CartAdmin(admin.ModelAdmin):
             'description': 'Core cart details.'
         }),
         ('Pricing Details', {
-            'fields': ('subtotal', 'vat', 'discount', 'total'),
+            'fields': ('subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs'),
             'classes': ('inline-group',),
-            'description': 'Cart pricing information.'
+            'description': 'Pricing, units, and discount information.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -614,14 +672,10 @@ class CartAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def save_related(self, request, form, formsets, change):
-        try:
-            super().save_related(request, form, formsets, change)
-        except ValidationError as e:
-            for field, errors in e.error_dict.items():
-                for error in errors:
-                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the cart."""
+        return f"Cart for {obj.user.email} (Total: {obj.total})"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -629,25 +683,25 @@ class CartAdmin(admin.ModelAdmin):
         }
 
 class CartItemAdmin(admin.ModelAdmin):
-    list_display = ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'created_at')
-    search_fields = ('cart__user__email', 'item__sku', 'pricing_tier__product_variant__name')
+    list_display = ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'created_at', 'grok_side_view')
+    search_fields = ('cart__user__email', 'item__sku')
     list_filter = ('unit_type', 'created_at', 'updated_at')
     ordering = ('cart', 'item')
     autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('subtotal', 'total_cost', 'created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total_cost')
 
     fieldsets = (
         ('Basic Information', {
-            'fields': ('cart', 'item', 'pricing_tier'),
+            'fields': ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type'),
             'description': 'Core cart item details.'
         }),
-        ('Quantity and Pricing', {
-            'fields': ('quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost'),
+        ('Pricing Details', {
+            'fields': ('per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price'),
             'classes': ('inline-group',),
-            'description': 'Specify quantity and pricing details.'
+            'description': 'Pricing and discount information.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -661,6 +715,11 @@ class CartItemAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
+
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the cart item."""
+        return f"{obj.quantity} {obj.unit_type} of {obj.item.sku} (Total: {obj.total_cost})"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -670,8 +729,8 @@ class CartItemAdmin(admin.ModelAdmin):
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
-    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost')
-    readonly_fields = ('total_cost',)
+    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at')
+    readonly_fields = ('created_at', 'total_cost')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     class Media:
@@ -680,25 +739,26 @@ class OrderItemInline(admin.TabularInline):
         }
 
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'status', 'total_amount', 'payment_status', 'created_at')
+    list_display = ('id', 'user', 'status', 'total_amount', 'payment_status', 'created_at', 'grok_side_view')
     search_fields = ('user__email', 'transaction_id')
     list_filter = ('status', 'payment_status', 'created_at')
-    ordering = ('-created_at',)
+    ordering = ('created_at', 'user')
     inlines = [OrderItemInline]
     autocomplete_fields = ['user']
-    readonly_fields = ('total_amount', 'created_at')
+    readonly_fields = ('created_at',)
 
     fieldsets = (
         ('Basic Information', {
-            'fields': ('user', 'status', 'payment_status'),
+            'fields': ('user', 'status', 'total_amount'),
             'description': 'Core order details.'
         }),
-        ('Details', {
-            'fields': ('total_amount', 'shipping_address', 'payment_method', 'transaction_id'),
-            'description': 'Order and payment information.'
+        ('Shipping and Payment', {
+            'fields': ('shipping_address', 'payment_status', 'payment_method', 'transaction_id'),
+            'classes': ('inline-group',),
+            'description': 'Shipping and payment information.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -713,14 +773,10 @@ class OrderAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def save_related(self, request, form, formsets, change):
-        try:
-            super().save_related(request, form, formsets, change)
-        except ValidationError as e:
-            for field, errors in e.error_dict.items():
-                for error in errors:
-                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the order."""
+        return f"Order {obj.id} by {obj.user.email} (Status: {obj.status})"
+    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -728,25 +784,25 @@ class OrderAdmin(admin.ModelAdmin):
         }
 
 class OrderItemAdmin(admin.ModelAdmin):
-    list_display = ('order', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'created_at')
-    search_fields = ('order__user__email', 'item__sku', 'pricing_tier__product_variant__name')
+    list_display = ('order', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'created_at', 'grok_side_view')
+    search_fields = ('order__user__email', 'item__sku')
     list_filter = ('unit_type', 'created_at')
     ordering = ('order', 'item')
     autocomplete_fields = ['order', 'item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('total_cost', 'created_at')
+    readonly_fields = ('created_at', 'total_cost')
 
     fieldsets = (
         ('Basic Information', {
-            'fields': ('order', 'item', 'pricing_tier'),
+            'fields': ('order', 'item', 'pricing_tier', 'quantity', 'unit_type'),
             'description': 'Core order item details.'
         }),
-        ('Quantity and Pricing', {
-            'fields': ('quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost'),
+        ('Pricing Details', {
+            'fields': ('per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price'),
             'classes': ('inline-group',),
-            'description': 'Specify quantity and pricing details.'
+            'description': 'Pricing and discount information.'
         }),
         ('Metadata', {
-            'fields': (),
+            'fields': ('created_at',),
             'classes': ('collapse',),
             'description': 'Timestamps and other metadata.'
         }),
@@ -761,11 +817,17 @@ class OrderItemAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the order item."""
+        return f"{obj.quantity} {obj.unit_type} of {obj.item.sku} (Total: {obj.total_cost})"
+    grok_side_view.short_description = "Grok Side View"
+
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
+# Register all models with their respective admin classes
 admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)
 admin.site.register(ProductImage)

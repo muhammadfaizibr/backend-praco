@@ -5,8 +5,9 @@ from django_ckeditor_5.fields import CKEditor5Field
 from django.utils.text import slugify
 from django.core.validators import MinValueValidator
 from decimal import Decimal, ROUND_HALF_UP
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
+
 
 class Category(models.Model):
     """
@@ -767,14 +768,22 @@ class Cart(models.Model):
     )
     total = models.DecimalField(
         max_digits=12, 
-       
-
         decimal_places=2, 
         editable=False, 
         default=Decimal('0.00'), 
         help_text="Total after applying VAT and discount (subtotal + VAT - discount)."
     )
 
+    total_units = models.PositiveIntegerField(
+        editable=False,
+        default=0,
+        help_text="Total number of units across all cart items."
+    )
+    total_packs = models.PositiveIntegerField(
+        editable=False,
+        default=0,
+        help_text="Total number of packs across all cart items."
+    )
     class Meta:
         indexes = [
             models.Index(fields=['user']),
@@ -786,8 +795,33 @@ class Cart(models.Model):
     def calculate_subtotal(self):
         total = Decimal('0.00')
         for item in self.items.all():
-            total += item.subtotal()
+            total += item.total_cost  # Use total_cost from CartItem, which includes user-exclusive discounts
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def calculate_total_units_and_packs(self):
+        total_units = 0
+        total_packs = 0
+
+        for item in self.items.all():
+            units_per_pack = item.item.product_variant.units_per_pack
+            units_per_pallet = item.item.product_variant.units_per_pallet
+
+            # Calculate total units
+            if item.unit_type == 'pack':
+                total_units += item.quantity * units_per_pack
+            else:
+                total_units += item.quantity * units_per_pallet
+
+            # Calculate total packs
+            if item.unit_type == 'pack':
+                total_packs += item.quantity  # Directly use quantity as number of packs
+            else:
+                # Convert pallets to packs: (quantity * units_per_pallet) // units_per_pack
+                if units_per_pack > 0:  # Avoid division by zero
+                    equivalent_packs = (item.quantity * units_per_pallet) // units_per_pack
+                    total_packs += equivalent_packs
+
+        return total_units, total_packs
 
     def calculate_total(self):
         subtotal = self.subtotal
@@ -809,11 +843,13 @@ class Cart(models.Model):
         old_total = self.total
         self.total = self.calculate_total()
 
-        if old_subtotal != self.subtotal or old_total != self.total:
-            super().save(*args, **kwargs)
+        # Update total units and total packs
+        total_units, total_packs = self.calculate_total_units_and_packs()
+        self.total_units = total_units
+        self.total_packs = total_packs
 
-    def __str__(self):
-        return f"Cart for {self.user.email}"
+        if old_subtotal != self.subtotal or old_total != self.total or total_units != self.total_units or total_packs != self.total_packs:
+            super().save(*args, **kwargs)
 
     @classmethod
     def get_or_create_cart(cls, user):
@@ -833,7 +869,7 @@ class CartItem(models.Model):
     item = models.ForeignKey('Item', on_delete=models.PROTECT, related_name='cart_items')
     pricing_tier = models.ForeignKey('PricingTier', on_delete=models.PROTECT, related_name='cart_items')
     quantity = models.PositiveIntegerField()
-    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')), default='pack')
+    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'),), default='pack')
     per_unit_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit from PricingTierData")
     per_pack_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per pack (price per unit * units per pack)")
     subtotal = models.DecimalField(
@@ -841,13 +877,15 @@ class CartItem(models.Model):
         decimal_places=2, 
         editable=False, 
         default=Decimal('0.00'), 
-        help_text="Total cost before user_exclusive_price discount (per pack price * quantity or adjusted for pallet)"
+        help_text="Total cost before user-exclusive discounts (per pack price * quantity, adjusted for unit type)."
     )
     total_cost = models.DecimalField(
         max_digits=12, 
         decimal_places=2, 
         help_text="Total cost after user_exclusive_price discount"
     )
+
+    
     user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -858,7 +896,7 @@ class CartItem(models.Model):
             models.Index(fields=['pricing_tier']),
             models.Index(fields=['created_at']),
         ]
-        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type')
+        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type', 'quantity', 'updated_at')  # Ensures uniqueness of cart and item combination
         verbose_name = 'cart item'
         verbose_name_plural = 'cart items'
 
@@ -952,12 +990,7 @@ class CartItem(models.Model):
                     expected_subtotal = equivalent_pack_quantity * expected_per_pack_price
 
                 expected_subtotal = expected_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                if self.subtotal is None:
-                    self.subtotal = expected_subtotal
-                elif self.subtotal != expected_subtotal:
-                    errors['subtotal'] = (
-                        f"Subtotal {self.subtotal} does not match the expected subtotal {expected_subtotal}."
-                    )
+                self.subtotal = expected_subtotal
 
                 discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
                 discount = discount_percentage / Decimal('100.00')
@@ -986,17 +1019,66 @@ class CartItem(models.Model):
         if errors:
             raise ValidationError(errors)
 
-    def subtotal(self):
-        if not self.total_cost or not self.quantity:
-            return Decimal('0.00')
-        return self.total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.item} in cart {self.cart} ({self.quantity} {self.unit_type})"
+
+@receiver(post_save, sender=CartItem)
+def update_cart_on_cartitem_change(sender, instance, **kwargs):
+    cart = instance.cart
+    cart.subtotal = cart.calculate_subtotal()
+    total_units, total_packs = cart.calculate_total_units_and_packs()
+    cart.total_units = total_units
+    cart.total_packs = total_packs
+    cart.total = cart.calculate_total()
+    if cart.subtotal > Decimal('600.00'):
+        cart.discount = Decimal('10.00')
+    cart.save()
+
+@receiver(post_delete, sender=CartItem)
+def update_cart_on_cartitem_delete(sender, instance, **kwargs):
+    cart = instance.cart
+    cart.subtotal = cart.calculate_subtotal()
+    total_units, total_packs = cart.calculate_total_units_and_packs()
+    cart.total_units = total_units
+    cart.total_packs = total_packs
+    cart.total = cart.calculate_total()
+    if cart.subtotal > Decimal('600.00'):
+        cart.discount = Decimal('10.00')
+    cart.save()
+
+@receiver(pre_save, sender=CartItem)
+def update_cart_on_cartitem_pre_save(sender, instance, **kwargs):
+    if instance.pk:  # Only update if it's an existing instance being modified
+        old_instance = CartItem.objects.get(pk=instance.pk)
+        if old_instance.quantity != instance.quantity or old_instance.unit_type != instance.unit_type or old_instance.total_cost != instance.total_cost:
+            cart = instance.cart
+            cart.subtotal = cart.calculate_subtotal()
+            total_units, total_packs = cart.calculate_total_units_and_packs()
+            cart.total_units = total_units
+            cart.total_packs = total_packs
+            cart.total = cart.calculate_total()
+            if cart.subtotal > Decimal('600.00'):
+                cart.discount = Decimal('10.00')
+            cart.save()
+
+@receiver(pre_save, sender=CartItem)
+def update_cart_on_cartitem_pre_save(sender, instance, **kwargs):
+    if instance.pk:  # Only update if it's an existing instance being modified
+        old_instance = CartItem.objects.get(pk=instance.pk)
+        if old_instance.quantity != instance.quantity or old_instance.unit_type != instance.unit_type or old_instance.total_cost != instance.total_cost:
+            cart = instance.cart
+            cart.subtotal = cart.calculate_subtotal()
+            total_units, total_packs = cart.calculate_total_units_and_packs()
+            cart.total_units = total_units
+            cart.total_packs = total_packs
+            cart.total = cart.calculate_total()
+            if cart.subtotal > Decimal('600.00'):
+                cart.discount = Decimal('10.00')
+            cart.save()
 
 class Order(models.Model):
     """

@@ -268,7 +268,7 @@ class CartItemSerializer(serializers.ModelSerializer):
             'cart': data.get('cart'),
             'item': data.get('item'),
             'pricing_tier': data.get('pricing_tier'),
-            'quantity': data.get('quantity'),
+            'quantity': data.get('quantity', 1),  # Default to 1 if not provided
             'unit_type': data.get('unit_type'),
             'user_exclusive_price': data.get('user_exclusive_price'),
         }
@@ -336,62 +336,122 @@ class CartItemSerializer(serializers.ModelSerializer):
         cart = validated_data['cart']
         item = validated_data['item']
         pricing_tier = validated_data['pricing_tier']
+        quantity = validated_data.get('quantity', 1)  # Use provided quantity or default to 1
         unit_type = validated_data['unit_type']
+        user_exclusive_price = validated_data.get('user_exclusive_price')
 
+        # Check for existing cart item based on cart and item (unique_together constraint)
         existing_cart_item = CartItem.objects.filter(
             cart=cart,
             item=item,
-            pricing_tier=pricing_tier,
-            unit_type=unit_type
         ).first()
 
-        calculated_fields = self.context.get('calculated_fields', {})
-        per_unit_price = calculated_fields.get('per_unit_price', validated_data.get('per_unit_price'))
-        per_pack_price = calculated_fields.get('per_pack_price', validated_data.get('per_pack_price'))
-        subtotal = calculated_fields.get('subtotal', validated_data.get('subtotal'))
-        total_cost = calculated_fields.get('total_cost', validated_data.get('total_cost'))
+        # Fetch pricing data
+        pricing_data = PricingTierData.objects.filter(pricing_tier=pricing_tier, item=item).first()
+        if not pricing_data:
+            raise serializers.ValidationError("No pricing data found for this item and pricing tier.")
+
+        # Recalculate prices based on the new data
+        units_per_pack = item.product_variant.units_per_pack
+        units_per_pallet = item.product_variant.units_per_pallet
+        per_unit_price = pricing_data.price
+        per_pack_price = per_unit_price * Decimal(units_per_pack)
+
+        if unit_type == 'pack':
+            if pricing_tier.tier_type == 'pack':
+                subtotal = per_pack_price * Decimal(quantity)
+            else:
+                total_units = Decimal(quantity) * Decimal(units_per_pack)
+                equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
+                subtotal = equivalent_pallet_quantity * per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
+        else:
+            total_units = Decimal(quantity) * Decimal(units_per_pallet)
+            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
+            subtotal = equivalent_pack_quantity * per_pack_price
+        subtotal = subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        discount_percentage = user_exclusive_price.discount_percentage if user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        total_cost = subtotal * (Decimal('1.00') - discount)
+        total_cost = total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         if existing_cart_item:
-            existing_cart_item.quantity += validated_data['quantity']
+            # Update the existing cart item with new values
+            existing_cart_item.quantity = quantity
+            existing_cart_item.pricing_tier = pricing_tier
+            existing_cart_item.unit_type = unit_type
             existing_cart_item.per_unit_price = per_unit_price
             existing_cart_item.per_pack_price = per_pack_price
             existing_cart_item.subtotal = subtotal
             existing_cart_item.total_cost = total_cost
-            existing_cart_item.user_exclusive_price = validated_data.get('user_exclusive_price')
+            existing_cart_item.user_exclusive_price = user_exclusive_price
             existing_cart_item.save()
             return existing_cart_item
         else:
+            # Create a new cart item if it doesn't exist
             cart_item = CartItem(
                 cart=cart,
                 item=item,
                 pricing_tier=pricing_tier,
-                quantity=validated_data['quantity'],
+                quantity=quantity,
                 unit_type=unit_type,
                 per_unit_price=per_unit_price,
                 per_pack_price=per_pack_price,
                 subtotal=subtotal,
                 total_cost=total_cost,
-                user_exclusive_price=validated_data.get('user_exclusive_price')
+                user_exclusive_price=user_exclusive_price
             )
             cart_item.save()
             return cart_item
 
     def update(self, instance, validated_data):
-        calculated_fields = self.context.get('calculated_fields', {})
+        # Update fields with new values from validated_data
         instance.quantity = validated_data.get('quantity', instance.quantity)
+        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
         instance.unit_type = validated_data.get('unit_type', instance.unit_type)
-        instance.per_unit_price = calculated_fields.get('per_unit_price', validated_data.get('per_unit_price', instance.per_unit_price))
-        instance.per_pack_price = calculated_fields.get('per_pack_price', validated_data.get('per_pack_price', instance.per_pack_price))
-        instance.subtotal = calculated_fields.get('subtotal', validated_data.get('subtotal', instance.subtotal))
-        instance.total_cost = calculated_fields.get('total_cost', validated_data.get('total_cost', instance.total_cost))
         instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+
+        # Recalculate pricing based on updated values
+        pricing_data = PricingTierData.objects.filter(pricing_tier=instance.pricing_tier, item=instance.item).first()
+        if not pricing_data:
+            raise serializers.ValidationError("No pricing data found for this item and pricing tier.")
+
+        units_per_pack = instance.item.product_variant.units_per_pack
+        units_per_pallet = instance.item.product_variant.units_per_pallet
+        per_unit_price = pricing_data.price
+        per_pack_price = per_unit_price * Decimal(units_per_pack)
+
+        if instance.unit_type == 'pack':
+            if instance.pricing_tier.tier_type == 'pack':
+                subtotal = per_pack_price * Decimal(instance.quantity)
+            else:
+                total_units = Decimal(instance.quantity) * Decimal(units_per_pack)
+                equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
+                subtotal = equivalent_pallet_quantity * per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
+        else:
+            total_units = Decimal(instance.quantity) * Decimal(units_per_pallet)
+            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
+            subtotal = equivalent_pack_quantity * per_pack_price
+        subtotal = subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        discount_percentage = instance.user_exclusive_price.discount_percentage if instance.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        total_cost = subtotal * (Decimal('1.00') - discount)
+        total_cost = total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        # Update the instance with recalculated values
+        instance.per_unit_price = per_unit_price
+        instance.per_pack_price = per_pack_price
+        instance.subtotal = subtotal
+        instance.total_cost = total_cost
         instance.save()
+
         return instance
 
 class CartItemDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at']
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
         depth = 4
 
 class CartSerializer(serializers.ModelSerializer):
@@ -399,8 +459,8 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
-        fields = ['id', 'user', 'items', 'subtotal', 'vat', 'discount', 'total', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'user', 'subtotal', 'total', 'created_at', 'updated_at']
+        fields = ['id', 'user', 'items', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'subtotal', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at']
 
 class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
