@@ -629,8 +629,8 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
-    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at')
-    readonly_fields = ('created_at', 'subtotal', 'total_cost')
+    fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'weight', 'user_exclusive_price', 'created_at')
+    readonly_fields = ('created_at', 'subtotal', 'total_cost', 'weight')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     class Media:
@@ -639,12 +639,12 @@ class CartItemInline(admin.TabularInline):
         }
 
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('user', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at', 'grok_side_view')
+    list_display = ('user', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'total_weight', 'created_at', 'updated_at', 'grok_side_view')
     search_fields = ('user__email',)
     list_filter = ('created_at', 'updated_at')
     ordering = ('user', 'created_at')
     inlines = [CartItemInline]
-    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total', 'total_units', 'total_packs')
+    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total', 'total_units', 'total_packs', 'total_weight')
 
     fieldsets = (
         ('Basic Information', {
@@ -652,9 +652,9 @@ class CartAdmin(admin.ModelAdmin):
             'description': 'Core cart details.'
         }),
         ('Pricing Details', {
-            'fields': ('subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs'),
+            'fields': ('subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'total_weight'),
             'classes': ('inline-group',),
-            'description': 'Pricing, units, and discount information.'
+            'description': 'Pricing, units, weight, and discount information.'
         }),
         ('Metadata', {
             'fields': ('created_at', 'updated_at'),
@@ -683,12 +683,12 @@ class CartAdmin(admin.ModelAdmin):
         }
 
 class CartItemAdmin(admin.ModelAdmin):
-    list_display = ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'created_at', 'grok_side_view')
+    list_display = ('cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'weight', 'created_at', 'grok_side_view')
     search_fields = ('cart__user__email', 'item__sku')
     list_filter = ('unit_type', 'created_at', 'updated_at')
     ordering = ('cart', 'item')
     autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total_cost')
+    readonly_fields = ('created_at', 'updated_at', 'subtotal', 'total_cost', 'weight')
 
     fieldsets = (
         ('Basic Information', {
@@ -696,9 +696,9 @@ class CartItemAdmin(admin.ModelAdmin):
             'description': 'Core cart item details.'
         }),
         ('Pricing Details', {
-            'fields': ('per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price'),
+            'fields': ('per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'weight', 'user_exclusive_price'),
             'classes': ('inline-group',),
-            'description': 'Pricing and discount information.'
+            'description': 'Pricing, weight, and discount information.'
         }),
         ('Metadata', {
             'fields': ('created_at', 'updated_at'),
@@ -725,12 +725,11 @@ class CartItemAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
     fields = ('item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at')
-    readonly_fields = ('created_at', 'total_cost')
+    readonly_fields = ('created_at', 'per_unit_price', 'per_pack_price', 'total_cost')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     class Media:
@@ -789,7 +788,7 @@ class OrderItemAdmin(admin.ModelAdmin):
     list_filter = ('unit_type', 'created_at')
     ordering = ('order', 'item')
     autocomplete_fields = ['order', 'item', 'pricing_tier', 'user_exclusive_price']
-    readonly_fields = ('created_at', 'total_cost')
+    readonly_fields = ('created_at', 'per_unit_price', 'per_pack_price', 'total_cost')
 
     fieldsets = (
         ('Basic Information', {
@@ -799,7 +798,7 @@ class OrderItemAdmin(admin.ModelAdmin):
         ('Pricing Details', {
             'fields': ('per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price'),
             'classes': ('inline-group',),
-            'description': 'Pricing and discount information.'
+            'description': 'Pricing and discount information (dynamically calculated).'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -826,7 +825,6 @@ class OrderItemAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
 # Register all models with their respective admin classes
 admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)

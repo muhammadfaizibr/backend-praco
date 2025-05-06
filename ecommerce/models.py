@@ -5,7 +5,7 @@ from django_ckeditor_5.fields import CKEditor5Field
 from django.utils.text import slugify
 from django.core.validators import MinValueValidator
 from decimal import Decimal, ROUND_HALF_UP
-from django.db.models.signals import post_save, post_delete, pre_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
 
@@ -596,8 +596,7 @@ class Item(models.Model):
                 existing_pricing_data = set(self.pricing_tier_data.values_list('pricing_tier_id', flat=True))
                 self.status = 'active' if all(tier.id in existing_pricing_data for tier in pricing_tiers) else 'draft'
                 super().save(update_fields=['status'])
-            except AttributeError as e:
-                # Log the error if needed, but don't fail the save operation
+            except AttributeError:
                 pass
 
     def __str__(self):
@@ -773,7 +772,6 @@ class Cart(models.Model):
         default=Decimal('0.00'), 
         help_text="Total after applying VAT and discount (subtotal + VAT - discount)."
     )
-
     total_units = models.PositiveIntegerField(
         editable=False,
         default=0,
@@ -784,6 +782,14 @@ class Cart(models.Model):
         default=0,
         help_text="Total number of packs across all cart items."
     )
+    total_weight = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        editable=False, 
+        default=Decimal('0.00'), 
+        help_text="Total weight of all items in the cart (in kilograms)."
+    )
+
     class Meta:
         indexes = [
             models.Index(fields=['user']),
@@ -795,7 +801,7 @@ class Cart(models.Model):
     def calculate_subtotal(self):
         total = Decimal('0.00')
         for item in self.items.all():
-            total += item.total_cost  # Use total_cost from CartItem, which includes user-exclusive discounts
+            total += item.total_cost
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total_units_and_packs(self):
@@ -814,14 +820,20 @@ class Cart(models.Model):
 
             # Calculate total packs
             if item.unit_type == 'pack':
-                total_packs += item.quantity  # Directly use quantity as number of packs
+                total_packs += item.quantity
             else:
-                # Convert pallets to packs: (quantity * units_per_pallet) // units_per_pack
-                if units_per_pack > 0:  # Avoid division by zero
+                if units_per_pack > 0:
                     equivalent_packs = (item.quantity * units_per_pallet) // units_per_pack
                     total_packs += equivalent_packs
 
         return total_units, total_packs
+
+    def calculate_total_weight(self):
+        total_weight = Decimal('0.00')
+        for item in self.items.all():
+            if item.weight is not None:
+                total_weight += item.weight
+        return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total(self):
         subtotal = self.subtotal
@@ -830,30 +842,26 @@ class Cart(models.Model):
         total = subtotal + vat_amount - discount_amount
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
-    def save(self, *args, **kwargs):
-        if not self.pk:
-            super().save(*args, **kwargs)
-
-        old_subtotal = self.subtotal
+    def update_cart(self):
+        """Recalculate and update cart fields."""
         self.subtotal = self.calculate_subtotal()
-
-        if self.subtotal > Decimal('600.00'):
-            self.discount = Decimal('10.00')
-
-        old_total = self.total
+        self.discount = Decimal('10.00') if self.subtotal > Decimal('600.00') else Decimal('0.00')
+        self.total_units, self.total_packs = self.calculate_total_units_and_packs()
+        self.total_weight = self.calculate_total_weight()
         self.total = self.calculate_total()
+        super().save()  # Use super to avoid recursive calls
 
-        # Update total units and total packs
-        total_units, total_packs = self.calculate_total_units_and_packs()
-        self.total_units = total_units
-        self.total_packs = total_packs
-
-        if old_subtotal != self.subtotal or old_total != self.total or total_units != self.total_units or total_packs != self.total_packs:
+    def save(self, *args, **kwargs):
+        if not self.pk:  # Only save on creation to avoid recursion
             super().save(*args, **kwargs)
+        # Updates are handled via update_cart to ensure consistency
+        self.update_cart()
 
     @classmethod
     def get_or_create_cart(cls, user):
         cart, created = cls.objects.get_or_create(user=user)
+        if created:
+            cart.update_cart()  # Ensure initial values are set
         return cart, created
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
@@ -884,8 +892,13 @@ class CartItem(models.Model):
         decimal_places=2, 
         help_text="Total cost after user_exclusive_price discount"
     )
-
-    
+    weight = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        editable=False, 
+        default=Decimal('0.00'), 
+        help_text="Total weight of the item in the cart (in kilograms, based on item weight and quantity)."
+    )
     user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -896,9 +909,26 @@ class CartItem(models.Model):
             models.Index(fields=['pricing_tier']),
             models.Index(fields=['created_at']),
         ]
-        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type', 'quantity', 'updated_at')  # Ensures uniqueness of cart and item combination
+        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type', 'quantity', 'updated_at')
         verbose_name = 'cart item'
         verbose_name_plural = 'cart items'
+
+    def convert_weight_to_kg(self, weight, weight_unit):
+        """
+        Convert item weight to kilograms based on its weight unit.
+        """
+        if weight is None or weight_unit is None:
+            return Decimal('0.00')
+        weight = Decimal(str(weight))
+        if weight_unit == 'lb':
+            return (weight * Decimal('0.453592')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'oz':
+            return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'g':
+            return (weight * Decimal('0.001')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'kg':
+            return weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return Decimal('0.00')
 
     @property
     def total_units(self):
@@ -929,6 +959,14 @@ class CartItem(models.Model):
             total_units = self.total_units
             units_per_pack = self.item.product_variant.units_per_pack
             units_per_pallet = self.item.product_variant.units_per_pallet
+
+            # Calculate weight in kg
+            item_weight_kg = self.convert_weight_to_kg(self.item.weight, self.item.weight_unit)
+            if self.unit_type == 'pack':
+                total_weight = item_weight_kg * Decimal(total_units)
+            else:
+                total_weight = item_weight_kg * Decimal(total_units)
+            self.weight = total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
             if self.unit_type == 'pack':
                 if self.pricing_tier.tier_type == 'pallet':
@@ -1022,63 +1060,27 @@ class CartItem(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+        # Trigger cart update after save
+        try:
+            self.cart.update_cart()
+        except Exception:
+            pass
 
-    def __str__(self):
-        return f"{self.item} in cart {self.cart} ({self.quantity} {self.unit_type})"
+@receiver(post_save, sender='ecommerce.CartItem')
+def update_cart_on_cartitem_save(sender, instance, created, **kwargs):
+    """Update the cart when a CartItem is created or updated."""
+    try:
+        instance.cart.update_cart()
+    except Exception:
+        pass
 
-@receiver(post_save, sender=CartItem)
-def update_cart_on_cartitem_change(sender, instance, **kwargs):
-    cart = instance.cart
-    cart.subtotal = cart.calculate_subtotal()
-    total_units, total_packs = cart.calculate_total_units_and_packs()
-    cart.total_units = total_units
-    cart.total_packs = total_packs
-    cart.total = cart.calculate_total()
-    if cart.subtotal > Decimal('600.00'):
-        cart.discount = Decimal('10.00')
-    cart.save()
-
-@receiver(post_delete, sender=CartItem)
+@receiver(post_delete, sender='ecommerce.CartItem')
 def update_cart_on_cartitem_delete(sender, instance, **kwargs):
-    cart = instance.cart
-    cart.subtotal = cart.calculate_subtotal()
-    total_units, total_packs = cart.calculate_total_units_and_packs()
-    cart.total_units = total_units
-    cart.total_packs = total_packs
-    cart.total = cart.calculate_total()
-    if cart.subtotal > Decimal('600.00'):
-        cart.discount = Decimal('10.00')
-    cart.save()
-
-@receiver(pre_save, sender=CartItem)
-def update_cart_on_cartitem_pre_save(sender, instance, **kwargs):
-    if instance.pk:  # Only update if it's an existing instance being modified
-        old_instance = CartItem.objects.get(pk=instance.pk)
-        if old_instance.quantity != instance.quantity or old_instance.unit_type != instance.unit_type or old_instance.total_cost != instance.total_cost:
-            cart = instance.cart
-            cart.subtotal = cart.calculate_subtotal()
-            total_units, total_packs = cart.calculate_total_units_and_packs()
-            cart.total_units = total_units
-            cart.total_packs = total_packs
-            cart.total = cart.calculate_total()
-            if cart.subtotal > Decimal('600.00'):
-                cart.discount = Decimal('10.00')
-            cart.save()
-
-@receiver(pre_save, sender=CartItem)
-def update_cart_on_cartitem_pre_save(sender, instance, **kwargs):
-    if instance.pk:  # Only update if it's an existing instance being modified
-        old_instance = CartItem.objects.get(pk=instance.pk)
-        if old_instance.quantity != instance.quantity or old_instance.unit_type != instance.unit_type or old_instance.total_cost != instance.total_cost:
-            cart = instance.cart
-            cart.subtotal = cart.calculate_subtotal()
-            total_units, total_packs = cart.calculate_total_units_and_packs()
-            cart.total_units = total_units
-            cart.total_packs = total_packs
-            cart.total = cart.calculate_total()
-            if cart.subtotal > Decimal('600.00'):
-                cart.discount = Decimal('10.00')
-            cart.save()
+    """Update the cart when a CartItem is deleted."""
+    try:
+        instance.cart.update_cart()
+    except Exception:
+        pass
 
 class Order(models.Model):
     """

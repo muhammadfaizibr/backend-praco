@@ -260,8 +260,8 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'created_at']
-        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost']
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'user_exclusive_price', 'weight', 'created_at']
+        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'subtotal', 'total_cost', 'weight']
 
     def validate(self, data):
         instance_data = {
@@ -318,8 +318,8 @@ class CartItemSerializer(serializers.ModelSerializer):
 
         if instance.quantity <= 0:
             raise serializers.ValidationError("Quantity must be positive.")
-        if instance.unit_type not in ['pack', 'pallet']:
-            raise serializers.ValidationError("Unit type must be 'pack' or 'pallet'.")
+        # if instance.unit_type not in ['pack', 'pallet']:
+        #     raise serializers.ValidationError("Unit type must be 'pack' or 'pallet'.")
         if instance.pricing_tier.product_variant != instance.item.product_variant:
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
         if instance.item.product_variant.show_units_per == 'pack' and instance.unit_type == 'pallet':
@@ -451,7 +451,7 @@ class CartItemSerializer(serializers.ModelSerializer):
 class CartItemDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'weight', 'created_at']
         depth = 4
 
 class CartSerializer(serializers.ModelSerializer):
@@ -459,8 +459,8 @@ class CartSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cart
-        fields = ['id', 'user', 'items', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'user', 'subtotal', 'total', 'total_units', 'total_packs', 'created_at', 'updated_at']
+        fields = ['id', 'user', 'items', 'subtotal', 'vat', 'discount', 'total', 'total_units', 'total_packs', 'total_weight', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'subtotal', 'total', 'total_units', 'total_packs', 'total_weight', 'created_at', 'updated_at']
 
 class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
@@ -497,8 +497,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
         if instance.quantity <= 0:
             raise serializers.ValidationError("Quantity must be positive.")
-        if instance.unit_type not in ['pack', 'pallet']:
-            raise serializers.ValidationError("Unit type must be 'pack' or 'pallet'.")
+        # if instance.unit_type not in ['pack', 'pallet']:
+        #     raise serializers.ValidationError("Unit type must be 'pack' or 'pallet'.")
         if instance.pricing_tier.product_variant != instance.item.product_variant:
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
         if instance.item.product_variant.show_units_per == 'pack' and instance.unit_type == 'pallet':
