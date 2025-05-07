@@ -481,21 +481,23 @@ class CartItemViewSet(viewsets.ModelViewSet):
         pack_quantity = data.get('pack_quantity', 1)
         user_exclusive_price_id = data.get('user_exclusive_price')
 
+        if not item_id:
+            raise ValidationError({"item": "Item ID is required."})
+
         item = Item.objects.get(id=item_id)
         pricing_tier = PricingTier.objects.get(id=pricing_tier_id)
-        
+
         # Check if CartItem already exists
         existing_cart_item = CartItem.objects.filter(
             cart=cart,
             item=item,
-            pricing_tier=pricing_tier,
-            unit_type='pack'
         ).first()
 
         serializer_context = {'request': self.request}
         if existing_cart_item:
-            # Update existing CartItem
-            existing_cart_item.pack_quantity += pack_quantity  # Add to existing quantity
+            # Replace existing CartItem data
+            existing_cart_item.pack_quantity = pack_quantity
+            existing_cart_item.pricing_tier = pricing_tier
             if user_exclusive_price_id:
                 existing_cart_item.user_exclusive_price = UserExclusivePrice.objects.filter(
                     id=user_exclusive_price_id,
@@ -528,13 +530,65 @@ class CartItemViewSet(viewsets.ModelViewSet):
 
         return serializer.data
 
-    def update(self, instance, validated_data):
+    def update(self, request, *args, **kwargs):
+        # Retrieve the CartItem instance using the pk from kwargs
+        pk = kwargs.get('pk')
+        try:
+            instance = self.get_queryset().get(pk=pk)
+        except CartItem.DoesNotExist:
+            return Response(
+                {"detail": "Cart item not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if item is None before proceeding
+        if instance.item is None:
+            instance.delete()
+            return Response(
+                {"detail": "Cart item has no associated item and has been deleted."},
+                status=status.HTTP_410_GONE
+            )
+
+        # Get the serializer with the request data
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+
+        # Update the instance with validated data
         instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
         instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
         instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
-        instance.full_clean()
-        instance.save()
-        return instance
+
+        try:
+            # Validate and save the updated instance
+            instance.full_clean()
+            instance.save()
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Serialize the updated instance for the response
+        response_serializer = CartItemDetailSerializer(instance, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+        except CartItem.DoesNotExist:
+            return Response(
+                {"detail": "Cart item not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if item is None
+        if instance.item is None:
+            instance.delete()
+            return Response(
+                {"detail": "Cart item has no associated item and has been deleted."},
+                status=status.HTTP_410_GONE
+            )
+
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
 class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all().select_related('user').prefetch_related('items__item', 'items__pricing_tier')

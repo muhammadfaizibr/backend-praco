@@ -828,37 +828,44 @@ class CartItem(models.Model):
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
-        # Check for existing CartItem with the same cart and item (per unique_together constraint)
-        existing_cart_item = CartItem.objects.filter(
-            cart=self.cart,
-            item=self.item,
-        ).exclude(pk=self.pk).first()
+        from django.db import transaction
+        # Enforce that item is not None even if full_clean is bypassed
+        if not self.item:
+            raise ValidationError({"item": "CartItem cannot be saved without an item."})
 
-        if existing_cart_item:
-            # Update the existing CartItem
-            existing_cart_item.pack_quantity += self.pack_quantity
-            existing_cart_item.pricing_tier = self.pricing_tier
-            existing_cart_item.user_exclusive_price = self.user_exclusive_price or existing_cart_item.user_exclusive_price
-            existing_cart_item.unit_type = self.unit_type
-            existing_cart_item.full_clean()
-            existing_cart_item.save(*args, **kwargs)
-            # Update the cart
-            try:
-                self.cart.update_cart()
-            except Exception:
-                pass
-            # Set the current instance's pk to the existing one to prevent saving a new record
-            self.pk = existing_cart_item.pk
-            return existing_cart_item
-        else:
-            # Proceed with saving new or updating existing CartItem
-            self.full_clean()
-            super().save(*args, **kwargs)
-            try:
-                self.cart.update_cart()
-            except Exception:
-                pass
-            return self
+        with transaction.atomic():
+            # Check for existing CartItem with the same cart and item
+            existing_cart_item = CartItem.objects.filter(
+                cart=self.cart,
+                item=self.item,
+            ).exclude(pk=self.pk).first()
+
+            if existing_cart_item:
+                # Replace the existing CartItem's data with new values
+                existing_cart_item.pack_quantity = self.pack_quantity
+                existing_cart_item.pricing_tier = self.pricing_tier
+                existing_cart_item.user_exclusive_price = self.user_exclusive_price
+                existing_cart_item.unit_type = self.unit_type
+                existing_cart_item.full_clean()
+                existing_cart_item.save(*args, **kwargs)
+                # Update the cart
+                try:
+                    self.cart.update_cart()
+                except Exception:
+                    pass
+                # Set the current instance's pk to the existing one to prevent saving a new record
+                self.pk = existing_cart_item.pk
+                return existing_cart_item
+            else:
+                # Proceed with saving new or updating existing CartItem
+                self.full_clean()
+                super().save(*args, **kwargs)
+                try:
+                    self.cart.update_cart()
+                except Exception:
+                    pass
+                return self
+
 
 class Cart(models.Model):
     user = models.OneToOneField(
@@ -933,13 +940,15 @@ class Cart(models.Model):
         return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total(self):
-        """Calculate the total including UserExclusivePrice discounts, VAT, and cart-level discount."""
+        """Calculate the total: Subtotal -> Apply Discount -> Add 20% VAT."""
         subtotal = self.calculate_subtotal()
-        vat_amount = (subtotal * self.vat) / Decimal('100.00')
         discount_amount = (subtotal * self.discount) / Decimal('100.00')
-        total = subtotal + vat_amount - discount_amount
+        discounted_subtotal = subtotal - discount_amount
+        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+        total = discounted_subtotal + vat_amount
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
+    
+    
     def update_cart(self):
         """Update cart discount based on subtotal with UserExclusivePrice discounts."""
         subtotal = self.calculate_subtotal()
