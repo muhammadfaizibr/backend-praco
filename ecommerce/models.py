@@ -866,7 +866,6 @@ class CartItem(models.Model):
                     pass
                 return self
 
-
 class Cart(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -948,7 +947,7 @@ class Cart(models.Model):
         total = discounted_subtotal + vat_amount
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     
-    
+
     def update_cart(self):
         """Update cart discount based on subtotal with UserExclusivePrice discounts."""
         subtotal = self.calculate_subtotal()

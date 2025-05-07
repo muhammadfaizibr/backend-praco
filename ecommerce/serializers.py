@@ -254,7 +254,7 @@ class UserExclusivePriceSerializer(serializers.ModelSerializer):
 
 class CartItemSerializer(serializers.ModelSerializer):
     cart = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
-    item = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
+    item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
     pricing_tier = serializers.PrimaryKeyRelatedField(queryset=PricingTier.objects.all())
     user_exclusive_price = serializers.PrimaryKeyRelatedField(
         queryset=UserExclusivePrice.objects.all(), required=False, allow_null=True
@@ -267,9 +267,9 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         instance_data = {
-            'cart': data.get('cart'),
-            'item': data.get('item'),
-            'pricing_tier': data.get('pricing_tier'),
+            'cart': data.get('cart', getattr(self.instance, 'cart', None)),
+            'item': data.get('item', getattr(self.instance, 'item', None)),
+            'pricing_tier': data.get('pricing_tier', getattr(self.instance, 'pricing_tier', None)),
             'pack_quantity': data.get('pack_quantity', 1),
             'unit_type': data.get('unit_type', 'pack'),
             'user_exclusive_price': data.get('user_exclusive_price'),
@@ -278,12 +278,12 @@ class CartItemSerializer(serializers.ModelSerializer):
 
         if instance.pack_quantity <= 0:
             raise serializers.ValidationError("Pack quantity must be positive.")
-        if instance.pricing_tier.product_variant != instance.item.product_variant:
+        if instance.pricing_tier and instance.item and instance.pricing_tier.product_variant != instance.item.product_variant:
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
         if instance.user_exclusive_price:
-            if instance.user_exclusive_price.item != instance.item:
+            if instance.item and instance.user_exclusive_price.item != instance.item:
                 raise serializers.ValidationError("User exclusive price must correspond to the selected item.")
-            if instance.user_exclusive_price.user != instance.cart.user:
+            if instance.cart and instance.user_exclusive_price.user != instance.cart.user:
                 raise serializers.ValidationError("User exclusive price must correspond to the cart's user.")
 
         return data
@@ -349,20 +349,21 @@ class CartItemSerializer(serializers.ModelSerializer):
         return cart_item
 
     def update(self, instance, validated_data):
+        # Do not allow updating the item field
         instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
         instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
         instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
         instance.full_clean()
         instance.save()
-
         return instance
 
-
 class CartItemDetailSerializer(serializers.ModelSerializer):
+    item = ItemSerializer(read_only=True)  # Explicitly define the item field to use ItemSerializer
+
     class Meta:
         model = CartItem
         fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
-        depth = 4
+        # Removed depth=4 since we're explicitly defining nested serializers
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
@@ -403,7 +404,6 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
             'weight': self.get_weight(instance),
         })
         return representation
-
 
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemDetailSerializer(many=True, read_only=True)
