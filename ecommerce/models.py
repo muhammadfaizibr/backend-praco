@@ -746,7 +746,8 @@ class CartItem(models.Model):
         editable=False,  # Non-editable, fixed to 'pack'
         help_text="Unit type is fixed to 'pack'."
     )
-    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='cartitem_items')
+    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True,
+                                            related_name='cartitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -756,7 +757,7 @@ class CartItem(models.Model):
             models.Index(fields=['pricing_tier']),
             models.Index(fields=['created_at']),
         ]
-        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type', 'pack_quantity', 'updated_at')
+        unique_together = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'updated_at')
         verbose_name = 'cart item'
         verbose_name_plural = 'cart items'
 
@@ -827,12 +828,37 @@ class CartItem(models.Model):
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-        try:
-            self.cart.update_cart()
-        except Exception:
-            pass
+        # Check for existing CartItem with the same cart and item (per unique_together constraint)
+        existing_cart_item = CartItem.objects.filter(
+            cart=self.cart,
+            item=self.item,
+        ).exclude(pk=self.pk).first()
+
+        if existing_cart_item:
+            # Update the existing CartItem
+            existing_cart_item.pack_quantity += self.pack_quantity
+            existing_cart_item.pricing_tier = self.pricing_tier
+            existing_cart_item.user_exclusive_price = self.user_exclusive_price or existing_cart_item.user_exclusive_price
+            existing_cart_item.unit_type = self.unit_type
+            existing_cart_item.full_clean()
+            existing_cart_item.save(*args, **kwargs)
+            # Update the cart
+            try:
+                self.cart.update_cart()
+            except Exception:
+                pass
+            # Set the current instance's pk to the existing one to prevent saving a new record
+            self.pk = existing_cart_item.pk
+            return existing_cart_item
+        else:
+            # Proceed with saving new or updating existing CartItem
+            self.full_clean()
+            super().save(*args, **kwargs)
+            try:
+                self.cart.update_cart()
+            except Exception:
+                pass
+            return self
 
 class Cart(models.Model):
     user = models.OneToOneField(
@@ -844,15 +870,15 @@ class Cart(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     vat = models.DecimalField(
-        max_digits=5, 
-        decimal_places=2, 
-        default=Decimal('20.00'), 
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('20.00'),
         help_text="VAT percentage (e.g., 20 for 20%)."
     )
     discount = models.DecimalField(
-        max_digits=5, 
-        decimal_places=2, 
-        default=Decimal('0.00'), 
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
         help_text="Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR."
     )
 
@@ -871,16 +897,24 @@ class Cart(models.Model):
         return cart, created
 
     def calculate_subtotal(self):
+        """Calculate the subtotal of all CartItems, applying UserExclusivePrice discounts."""
         total = Decimal('0.00')
         for item in self.items.all():
             pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
-            if pricing_data:
+            if pricing_data and item.item.product_variant:
                 units_per_pack = item.item.product_variant.units_per_pack
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
-                total += per_pack_price * Decimal(item.pack_quantity)
+                item_subtotal = per_pack_price * Decimal(item.pack_quantity)
+                # Apply UserExclusivePrice discount if available
+                if item.user_exclusive_price:
+                    discount_percentage = item.user_exclusive_price.discount_percentage
+                    discount = discount_percentage / Decimal('100.00')
+                    item_subtotal = item_subtotal * (Decimal('1.00') - discount)
+                total += item_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total_units_and_packs(self):
+        """Calculate total units and packs across all CartItems."""
         total_units = 0
         total_packs = 0
         for item in self.items.all():
@@ -890,6 +924,7 @@ class Cart(models.Model):
         return total_units, total_packs
 
     def calculate_total_weight(self):
+        """Calculate the total weight of all CartItems."""
         total_weight = Decimal('0.00')
         for item in self.items.all():
             item_weight_kg = item.convert_weight_to_kg(item.item.weight, item.item.weight_unit)
@@ -898,6 +933,7 @@ class Cart(models.Model):
         return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total(self):
+        """Calculate the total including UserExclusivePrice discounts, VAT, and cart-level discount."""
         subtotal = self.calculate_subtotal()
         vat_amount = (subtotal * self.vat) / Decimal('100.00')
         discount_amount = (subtotal * self.discount) / Decimal('100.00')
@@ -905,7 +941,9 @@ class Cart(models.Model):
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def update_cart(self):
-        self.discount = Decimal('10.00') if self.calculate_subtotal() > Decimal('600.00') else Decimal('0.00')
+        """Update cart discount based on subtotal with UserExclusivePrice discounts."""
+        subtotal = self.calculate_subtotal()
+        self.discount = Decimal('10.00') if subtotal > Decimal('600.00') else Decimal('0.00')
         super().save()
 
     def save(self, *args, **kwargs):

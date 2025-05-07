@@ -405,6 +405,7 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
+
 class CartViewSet(viewsets.ModelViewSet):
     queryset = Cart.objects.all()
     serializer_class = CartSerializer
@@ -417,7 +418,7 @@ class CartViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access cart.")
         try:
-            cart = Cart.get_or_create_cart(request.user)
+            cart, created = Cart.get_or_create_cart(request.user)
             serializer = self.get_serializer(cart)
             return Response(serializer.data)
         except ValidationError as e:
@@ -439,7 +440,7 @@ class CartViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to clear cart.")
         try:
-            cart = Cart.get_or_create_cart(request.user)
+            cart, created = Cart.get_or_create_cart(request.user)
             cart.items.all().delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:
@@ -450,67 +451,90 @@ class CartItemViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_serializer_class(self):
-        """
-        Use CartItemDetailSerializer for read operations (GET),
-        and CartItemSerializer for write operations (POST/PATCH).
-        """
         if self.action in ['list', 'retrieve']:
             return CartItemDetailSerializer
         return CartItemSerializer
 
-    def get_queryset(self):
-        """
-        Return cart items for the authenticated user's cart.
-        """
-        if not self.request.user.is_authenticated:
-            raise PermissionDenied("Authentication required to access cart items.")
-        try:
-            cart, created = Cart.get_or_create_cart(self.request.user)
-            return self.queryset.filter(cart=cart)
-        except ValidationError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
     def create(self, request, *args, **kwargs):
-        """
-        Create one or more cart items for the authenticated user's cart.
-        """
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to add cart items.")
         try:
             cart, created = Cart.get_or_create_cart(request.user)
-            data = request.data.copy()  # Use copy to avoid modifying the original
-
-            # Handle both single item and bulk creation
+            data = request.data.copy() if isinstance(request.data, dict) else request.data
             if isinstance(data, list):
-                serializer = self.get_serializer(data=[{**item, 'cart': cart.id} for item in data], many=True)
+                responses = []
+                with transaction.atomic():
+                    for item_data in data:
+                        item_data['cart'] = cart.id
+                        responses.append(self._process_cart_item(item_data, cart))
+                return Response(responses, status=status.HTTP_200_OK)
             else:
                 data['cart'] = cart.id
-                serializer = self.get_serializer(data=data)
-
-            serializer.is_valid(raise_exception=True)
-            
-            with transaction.atomic():
-                self.perform_create(serializer)
-            
-            headers = self.get_success_headers(serializer.data)
-            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+                response = self._process_cart_item(data, cart)
+                return Response(response, status=status.HTTP_200_OK)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    def update(self, request, *args, **kwargs):
-        """
-        Update a cart item, ensuring all required fields are preserved.
-        """
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        data = request.data.copy()  # Use copy to avoid modifying the original
-        data['cart'] = instance.cart.id  # Preserve cart ID
-        data['item'] = instance.item.id  # Preserve item ID
-        serializer = self.get_serializer(instance, data=data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        return Response(serializer.data)
-    
+    def _process_cart_item(self, data, cart):
+        item_id = data.get('item')
+        pricing_tier_id = data.get('pricing_tier')
+        pack_quantity = data.get('pack_quantity', 1)
+        user_exclusive_price_id = data.get('user_exclusive_price')
+
+        item = Item.objects.get(id=item_id)
+        pricing_tier = PricingTier.objects.get(id=pricing_tier_id)
+        
+        # Check if CartItem already exists
+        existing_cart_item = CartItem.objects.filter(
+            cart=cart,
+            item=item,
+            pricing_tier=pricing_tier,
+            unit_type='pack'
+        ).first()
+
+        serializer_context = {'request': self.request}
+        if existing_cart_item:
+            # Update existing CartItem
+            existing_cart_item.pack_quantity += pack_quantity  # Add to existing quantity
+            if user_exclusive_price_id:
+                existing_cart_item.user_exclusive_price = UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=cart.user,
+                    item=item
+                ).first()
+            else:
+                existing_cart_item.user_exclusive_price = None
+            existing_cart_item.full_clean()
+            existing_cart_item.save()
+            serializer = CartItemDetailSerializer(existing_cart_item, context=serializer_context)
+        else:
+            # Create new CartItem
+            cart_item_data = {
+                'cart': cart,
+                'item': item,
+                'pricing_tier': pricing_tier,
+                'pack_quantity': pack_quantity,
+                'unit_type': 'pack',
+                'user_exclusive_price': UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=cart.user,
+                    item=item
+                ).first() if user_exclusive_price_id else None
+            }
+            cart_item = CartItem(**cart_item_data)
+            cart_item.full_clean()
+            cart_item.save()
+            serializer = CartItemDetailSerializer(cart_item, context=serializer_context)
+
+        return serializer.data
+
+    def update(self, instance, validated_data):
+        instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
+        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
+        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+        instance.full_clean()
+        instance.save()
+        return instance
 
 class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all().select_related('user').prefetch_related('items__item', 'items__pricing_tier')

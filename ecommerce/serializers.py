@@ -359,6 +359,96 @@ class CartItemSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+class CartItemSerializer(serializers.ModelSerializer):
+    cart = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
+    item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all())
+    pricing_tier = serializers.PrimaryKeyRelatedField(queryset=PricingTier.objects.all())
+    user_exclusive_price = serializers.PrimaryKeyRelatedField(queryset=UserExclusivePrice.objects.all(), required=False, allow_null=True)
+
+    class Meta:
+        model = CartItem
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
+        read_only_fields = ['created_at', 'unit_type']
+
+    def validate(self, data):
+        instance_data = {
+            'cart': data.get('cart'),
+            'item': data.get('item'),
+            'pricing_tier': data.get('pricing_tier'),
+            'pack_quantity': data.get('pack_quantity', 1),
+            'unit_type': data.get('unit_type', 'pack'),
+            'user_exclusive_price': data.get('user_exclusive_price'),
+        }
+        instance = CartItem(**instance_data)
+
+        pricing_data = PricingTierData.objects.filter(
+            pricing_tier=instance.pricing_tier,
+            item=instance.item
+        ).first()
+        if not pricing_data:
+            raise serializers.ValidationError("No pricing data found for this item and pricing tier.")
+
+        units_per_pack = instance.item.product_variant.units_per_pack
+        price_per_unit = pricing_data.price
+        price_per_pack = price_per_unit * Decimal(units_per_pack)
+
+        subtotal = price_per_pack * Decimal(instance.pack_quantity)
+        subtotal = subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        discount_percentage = instance.user_exclusive_price.discount_percentage if instance.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        total = subtotal * (Decimal('1.00') - discount)
+        total = total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        item_weight_kg = instance.convert_weight_to_kg(instance.item.weight, instance.item.weight_unit)
+        total_units = instance.total_units
+        weight = item_weight_kg * Decimal(total_units)
+        weight = weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        self.context['calculated_fields'] = {
+            'price_per_unit': price_per_unit,
+            'price_per_pack': price_per_pack,
+            'subtotal': subtotal,
+            'total': total,
+            'weight': weight,
+        }
+
+        if instance.pack_quantity <= 0:
+            raise serializers.ValidationError("Pack quantity must be positive.")
+        if instance.pricing_tier.product_variant != instance.item.product_variant:
+            raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
+        if instance.user_exclusive_price:
+            if instance.user_exclusive_price.item != instance.item:
+                raise serializers.ValidationError("User exclusive price must correspond to the selected item.")
+            if instance.user_exclusive_price.user != instance.cart.user:
+                raise serializers.ValidationError("User exclusive price must correspond to the cart's user.")
+
+        return data
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        calculated_fields = self.context.get('calculated_fields', {})
+        representation.update({
+            'price_per_unit': calculated_fields.get('price_per_unit', Decimal('0.00')),
+            'price_per_pack': calculated_fields.get('price_per_pack', Decimal('0.00')),
+            'subtotal': calculated_fields.get('subtotal', Decimal('0.00')),
+            'total': calculated_fields.get('total', Decimal('0.00')),
+            'weight': calculated_fields.get('weight', Decimal('0.00')),
+        })
+        return representation
+
+    def create(self, validated_data):
+        # This method is overridden to prevent direct creation; handled in _process_cart_item
+        raise NotImplementedError("Use _process_cart_item for cart item creation")
+
+    def update(self, instance, validated_data):
+        instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
+        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
+        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+        instance.full_clean()
+        instance.save()
+        return instance
+
 class CartItemDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = CartItem
@@ -403,12 +493,30 @@ class CartSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
     def to_representation(self, instance):
+        if not isinstance(instance, Cart):
+            print(f"Unexpected instance type in CartSerializer: {type(instance)}, value: {instance}")
+            return {
+                'id': None,
+                'user': None,
+                'items': [],
+                'vat': str(Decimal('0.00')),
+                'discount': str(Decimal('0.00')),
+                'created_at': None,
+                'updated_at': None,
+                'subtotal': str(Decimal('0.00')),
+                'total': str(Decimal('0.00')),
+                'total_weight': str(Decimal('0.00')),
+                'total_units': 0,
+                'total_packs': 0,
+            }
+
         representation = super().to_representation(instance)
-        total_units, total_packs = instance.calculate_total_units_and_packs() if isinstance(instance, Cart) else (0, 0)
+        total_units, total_packs = instance.calculate_total_units_and_packs()
         representation.update({
-            'subtotal': instance.calculate_subtotal() if isinstance(instance, Cart) else Decimal('0.00'),
-            'total': instance.calculate_total() if isinstance(instance, Cart) else Decimal('0.00'),
-            'total_weight': instance.calculate_total_weight() if isinstance(instance, Cart) else Decimal('0.00'),
+            'id': instance.id,
+            'subtotal': instance.calculate_subtotal(),
+            'total': instance.calculate_total(),
+            'total_weight': instance.calculate_total_weight(),
             'total_units': total_units,
             'total_packs': total_packs,
         })

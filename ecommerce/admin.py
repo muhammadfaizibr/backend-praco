@@ -672,6 +672,104 @@ class CartItemInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
+class CartItemAdmin(admin.ModelAdmin):
+    search_fields = ('cart__user__email', 'item__sku')
+    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
+    list_filter = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    ordering = ('cart', 'item')
+    autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('cart', 'item', 'pricing_tier', 'pack_quantity'),
+            'description': 'Core cart item details.'
+        }),
+        ('Pricing Details', {
+            'fields': ('get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
+            'classes': ('inline-group',),
+            'description': 'Pricing, weight, and discount information. Note: Pricing and weight fields are automatically calculated and read-only.'
+        }),
+        ('Metadata', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def get_price_per_unit(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        return pricing_data.price if pricing_data else Decimal('0.00')
+    get_price_per_unit.short_description = "Price Per Unit"
+
+    def get_price_per_pack(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        return Decimal('0.00')
+    get_price_per_pack.short_description = "Price Per Pack"
+
+    def get_subtotal(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            units_per_pack = obj.item.product_variant.units_per_pack
+            per_pack_price = pricing_data.price * Decimal(units_per_pack)
+            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return Decimal('0.00')
+    get_subtotal.short_description = "Subtotal"
+
+    def get_total(self, obj):
+        subtotal = self.get_subtotal(obj)
+        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    get_total.short_description = "Total"
+
+    def get_weight(self, obj):
+        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+        total_units = obj.total_units
+        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    get_weight.short_description = "Weight"
+
+    def save_model(self, request, obj, form, change):
+        try:
+            # Check if CartItem already exists
+            existing_cart_item = CartItem.objects.filter(
+                cart=obj.cart,
+                item=obj.item,
+                pricing_tier=obj.pricing_tier,
+                unit_type=obj.unit_type
+            ).first()
+            
+            if existing_cart_item and existing_cart_item.pk != obj.pk:
+                # Update existing CartItem instead of creating new
+                existing_cart_item.pack_quantity += obj.pack_quantity
+                if obj.user_exclusive_price:
+                    existing_cart_item.user_exclusive_price = obj.user_exclusive_price
+                existing_cart_item.full_clean()
+                existing_cart_item.save()
+                obj = existing_cart_item
+            else:
+                # Save new or update existing CartItem
+                obj.full_clean()
+                obj.save()
+                
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+
+    def grok_side_view(self, obj):
+        """Grok Side View: Quick summary of the cart item."""
+        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
+    grok_side_view.short_description = "Grok Side View"
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 class CartAdmin(admin.ModelAdmin):
     list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at', 'grok_side_view')
     search_fields = ('user__email',)
@@ -737,85 +835,7 @@ class CartAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
-class CartItemAdmin(admin.ModelAdmin):
-    search_fields = ('cart__user__email', 'item__sku')
-    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
-    list_filter = ('created_at', 'updated_at')
-    readonly_fields = ('created_at', 'updated_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
-    ordering = ('cart', 'item')
-    autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
-
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('cart', 'item', 'pricing_tier', 'pack_quantity'),
-            'description': 'Core cart item details.'
-        }),
-        ('Pricing Details', {
-            'fields': ('get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
-            'classes': ('inline-group',),
-            'description': 'Pricing, weight, and discount information. Note: Pricing and weight fields are automatically calculated and read-only.'
-        }),
-        ('Metadata', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',),
-            'description': 'Timestamps and other metadata.'
-        }),
-    )
-
-    def get_price_per_unit(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        return pricing_data.price if pricing_data else Decimal('0.00')
-    get_price_per_unit.short_description = "Price Per Unit"
-
-    def get_price_per_pack(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
-        return Decimal('0.00')
-    get_price_per_pack.short_description = "Price Per Pack"
-
-    def get_subtotal(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
-            per_pack_price = pricing_data.price * Decimal(units_per_pack)
-            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        return Decimal('0.00')
-    get_subtotal.short_description = "Subtotal"
-
-    def get_total(self, obj):
-        subtotal = self.get_subtotal(obj)
-        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_total.short_description = "Total"
-
-    def get_weight(self, obj):
-        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
-        total_units = obj.total_units
-        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_weight.short_description = "Weight"
-
-    def save_model(self, request, obj, form, change):
-        try:
-            obj.save()
-        except ValidationError as e:
-            for field, errors in e.error_dict.items():
-                for error in errors:
-                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
-
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the cart item."""
-        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
-    grok_side_view.short_description = "Grok Side View"
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
-   
+  
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
