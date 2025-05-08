@@ -12,7 +12,7 @@ from ecommerce.serializers import (
     CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer,
     PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer,
     ItemImageSerializer, ItemDataSerializer, UserExclusivePriceSerializer,
-    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer
+    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer, OrderItemDetailSerializer
 )
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
 from django.db.models import Q
@@ -20,8 +20,10 @@ from decimal import Decimal
 from rest_framework.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from backend_praco.renderers import CustomRenderer
 
 class CategoryViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [AllowAny]
@@ -48,6 +50,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class ProductImageViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = ProductImage.objects.all()
     serializer_class = ProductImageSerializer
     permission_classes = [AllowAny]
@@ -60,6 +63,7 @@ class ProductImageViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class ProductViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = Product.objects.all().select_related('category').prefetch_related('images')
     serializer_class = ProductSerializer
     permission_classes = [AllowAny]
@@ -127,6 +131,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         return context
 
 class ProductVariantViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = ProductVariant.objects.filter(status="active").select_related('product').prefetch_related('pricing_tiers__pricing_data')
     serializer_class = ProductVariantSerializer
     permission_classes = [AllowAny]
@@ -224,6 +229,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
         })
 
 class PricingTierViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = PricingTier.objects.all().select_related('product_variant').prefetch_related('pricing_data')
     serializer_class = PricingTierSerializer
     permission_classes = [AllowAny]
@@ -236,6 +242,7 @@ class PricingTierViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class PricingTierDataViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = PricingTierData.objects.all().select_related('item__product_variant', 'pricing_tier')
     serializer_class = PricingTierDataSerializer
     permission_classes = [AllowAny]
@@ -248,6 +255,7 @@ class PricingTierDataViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class TableFieldViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = TableField.objects.all().select_related('product_variant')
     serializer_class = TableFieldSerializer
     permission_classes = [AllowAny]
@@ -260,6 +268,7 @@ class TableFieldViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class ItemImageViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = ItemImage.objects.all()
     serializer_class = ItemImageSerializer
     permission_classes = [AllowAny]
@@ -272,6 +281,7 @@ class ItemImageViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class ItemViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = Item.objects.all().select_related('product_variant__product__category').prefetch_related('data_entries__field', 'images', 'pricing_tier_data')
     serializer_class = ItemSerializer
     permission_classes = [AllowAny]
@@ -383,6 +393,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         return context
 
 class ItemDataViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
     serializer_class = ItemDataSerializer
     permission_classes = [AllowAny]
@@ -395,6 +406,7 @@ class ItemDataViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
 class UserExclusivePriceViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = UserExclusivePrice.objects.all().select_related('user', 'item__product_variant')
     serializer_class = UserExclusivePriceSerializer
     permission_classes = [IsAuthenticated]
@@ -407,6 +419,7 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
 class CartViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = Cart.objects.all()
     serializer_class = CartSerializer
     permission_classes = [IsAuthenticated]
@@ -447,6 +460,7 @@ class CartViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class CartItemViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     queryset = CartItem.objects.all()
     permission_classes = [IsAuthenticated]
 
@@ -586,38 +600,177 @@ class CartItemViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 class OrderViewSet(viewsets.ModelViewSet):
-    queryset = Order.objects.all().select_related('user').prefetch_related('items__item', 'items__pricing_tier')
+    renderer_classes = [CustomRenderer]
+    queryset = Order.objects.all()
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['user', 'status', 'payment_status']
+
+    def list(self, request, *args, **kwargs):
+        """Retrieve the authenticated user's orders."""
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to access orders.")
+        try:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def get_queryset(self):
-        if self.request.user.is_staff:
-            return self.queryset
+        """Return orders for the authenticated user."""
+        if not self.request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to access orders.")
         return self.queryset.filter(user=self.request.user)
 
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated()]
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+    def create(self, request, *args, **kwargs):
+        """Create a new order for the authenticated user."""
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to create an order.")
+        serializer = self.get_serializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 class OrderItemViewSet(viewsets.ModelViewSet):
-    queryset = OrderItem.objects.all().select_related('order__user', 'item', 'pricing_tier')
-    serializer_class = OrderItemSerializer
+    renderer_classes = [CustomRenderer]
+    queryset = OrderItem.objects.all()
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['order', 'item', 'unit_type']
 
-    def get_queryset(self):
-        if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(order__user=self.request.user)
+    def get_serializer_class(self):
+        if self.action in ['list', 'retrieve']:
+            return OrderItemDetailSerializer
+        return OrderItemSerializer
 
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated()]
+    def create(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            raise PermissionDenied("Authentication required to add order items.")
+        try:
+            data = request.data.copy() if isinstance(request.data, dict) else request.data
+            if isinstance(data, list):
+                responses = []
+                with transaction.atomic():
+                    for item_data in data:
+                        order_id = item_data.get('order')
+                        order = Order.objects.get(id=order_id, user=request.user)
+                        item_data['order'] = order.id
+                        responses.append(self._process_order_item(item_data, order))
+                return Response(responses, status=status.HTTP_200_OK)
+            else:
+                order_id = data.get('order')
+                order = Order.objects.get(id=order_id, user=request.user)
+                data['order'] = order.id
+                response = self._process_order_item(data, order)
+                return Response(response, status=status.HTTP_200_OK)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found or not accessible."}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def _process_order_item(self, data, order):
+        item_id = data.get('item')
+        pricing_tier_id = data.get('pricing_tier')
+        pack_quantity = data.get('pack_quantity', 1)
+        user_exclusive_price_id = data.get('user_exclusive_price')
+
+        if not item_id:
+            raise ValidationError({"item": "Item ID is required."})
+
+        item = Item.objects.get(id=item_id)
+        pricing_tier = PricingTier.objects.get(id=pricing_tier_id)
+
+        existing_order_item = OrderItem.objects.filter(
+            order=order,
+            item=item,
+        ).first()
+
+        serializer_context = {'request': self.request}
+        if existing_order_item:
+            existing_order_item.pack_quantity = pack_quantity
+            existing_order_item.pricing_tier = pricing_tier
+            if user_exclusive_price_id:
+                existing_order_item.user_exclusive_price = UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=order.user,
+                    item=item
+                ).first()
+            else:
+                existing_order_item.user_exclusive_price = None
+            existing_order_item.full_clean()
+            existing_order_item.save()
+            serializer = OrderItemDetailSerializer(existing_order_item, context=serializer_context)
+        else:
+            order_item_data = {
+                'order': order,
+                'item': item,
+                'pricing_tier': pricing_tier,
+                'pack_quantity': pack_quantity,
+                'unit_type': 'pack',
+                'user_exclusive_price': UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=order.user,
+                    item=item
+                ).first() if user_exclusive_price_id else None
+            }
+            order_item = OrderItem(**order_item_data)
+            order_item.full_clean()
+            order_item.save()
+            serializer = OrderItemDetailSerializer(order_item, context=serializer_context)
+
+        return serializer.data
+
+    def update(self, request, *args, **kwargs):
+        pk = kwargs.get('pk')
+        try:
+            instance = self.get_queryset().get(pk=pk)
+        except OrderItem.DoesNotExist:
+            return Response(
+                {"detail": "Order item not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if instance.item is None:
+            instance.delete()
+            return Response(
+                {"detail": "Order item has no associated item and has been deleted."},
+                status=status.HTTP_410_GONE
+            )
+
+        request_data = request.data.copy()
+        if 'item' in request_data:
+            del request_data['item']
+
+        serializer = self.get_serializer(instance, data=request_data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+
+        instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
+        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
+        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+
+        try:
+            instance.full_clean()
+            instance.save()
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_serializer = OrderItemDetailSerializer(instance, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+        except OrderItem.DoesNotExist:
+            return Response(
+                {"detail": "Order item not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if instance.item is None:
+            instance.delete()
+            return Response(
+                {"detail": "Order item has no associated item and has been deleted."},
+                status=status.HTTP_410_GONE
+            )
+
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)

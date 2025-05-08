@@ -7,6 +7,8 @@ from django.core.validators import MinValueValidator
 from decimal import Decimal, ROUND_HALF_UP
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
+from django.db import transaction
+from re import match
 
 
 class Category(models.Model):
@@ -964,75 +966,151 @@ def create_user_cart(sender, instance, created, **kwargs):
     if created:
         Cart.objects.get_or_create(user=instance)
 
-class Order(models.Model):
-    """
-    Represents a user's order with items, shipping, and payment details.
-    """
-    STATUS_CHOICES = (
-        ('pending', 'Pending'),
-        ('processing', 'Processing'),
-        ('shipped', 'Shipped'),
-        ('delivered', 'Delivered'),
-        ('cancelled', 'Cancelled'),
-    )
-    PAYMENT_STATUS_CHOICES = (
-        ('pending', 'Pending'),
-        ('completed', 'Completed'),
-        ('failed', 'Failed'),
-        ('refunded', 'Refunded'),
-    )
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='orders')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
-    shipping_address = models.TextField()
-    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
-    payment_method = models.CharField(max_length=100, blank=True)
-    transaction_id = models.CharField(max_length=100, blank=True)
+class Order(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='orders',
+        help_text="The user associated with this order."
+    )
+    country = models.CharField(
+        max_length=100,
+        default='United Kingdom',
+        editable=False,
+        help_text="Country is fixed to United Kingdom."
+    )
+    address = models.CharField(
+        max_length=255,
+        help_text="Street address for delivery."
+    )
+    city = models.CharField(
+        max_length=100,
+        help_text="City for delivery."
+    )
+    postal_code = models.CharField(
+        max_length=20,
+        help_text="Postal code for delivery."
+    )
+    notes = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional notes for the order."
+    )
+    vat = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('20.00'),
+        help_text="VAT percentage (e.g., 20 for 20%)."
+    )
+    discount = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR."
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
-            models.Index(fields=['user', 'status']),
+            models.Index(fields=['user']),
             models.Index(fields=['created_at']),
         ]
         verbose_name = 'order'
         verbose_name_plural = 'orders'
 
+    def calculate_subtotal(self):
+        """Calculate the subtotal of all OrderItems, applying UserExclusivePrice discounts."""
+        total = Decimal('0.00')
+        for item in self.items.all():
+            pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+            if pricing_data and item.item.product_variant:
+                units_per_pack = item.item.product_variant.units_per_pack
+                per_pack_price = pricing_data.price * Decimal(units_per_pack)
+                item_subtotal = per_pack_price * Decimal(item.pack_quantity)
+                if item.user_exclusive_price:
+                    discount_percentage = item.user_exclusive_price.discount_percentage
+                    discount = discount_percentage / Decimal('100.00')
+                    item_subtotal = item_subtotal * (Decimal('1.00') - discount)
+                total += item_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def calculate_total_units_and_packs(self):
+        """Calculate total units and packs across all OrderItems."""
+        total_units = 0
+        total_packs = 0
+        for item in self.items.all():
+            units_per_pack = item.item.product_variant.units_per_pack
+            total_units += item.pack_quantity * units_per_pack
+            total_packs += item.pack_quantity
+        return total_units, total_packs
+
+    def calculate_total_weight(self):
+        """Calculate the total weight of all OrderItems."""
+        total_weight = Decimal('0.00')
+        for item in self.items.all():
+            item_weight_kg = item.convert_weight_to_kg(item.item.weight, item.item.weight_unit)
+            total_units = item.total_units
+            total_weight += item_weight_kg * Decimal(total_units)
+        return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def calculate_total(self):
+        """Calculate the total: Subtotal -> Apply Discount -> Add 20% VAT."""
+        subtotal = self.calculate_subtotal()
+        discount_amount = (subtotal * self.discount) / Decimal('100.00')
+        discounted_subtotal = subtotal - discount_amount
+        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+        total = discounted_subtotal + vat_amount
+        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def update_order(self):
+        """Update order discount based on subtotal with UserExclusivePrice discounts."""
+        subtotal = self.calculate_subtotal()
+        self.discount = Decimal('10.00') if subtotal > Decimal('600.00') else Decimal('0.00')
+        super().save()
+
+    def save(self, *args, **kwargs):
+        if not self.pk:
+            super().save(*args, **kwargs)
+        self.update_order()
+
     def clean(self):
         errors = {}
-        if self.total_amount < 0:
-            errors['total_amount'] = "Total amount cannot be negative."
-        elif self.payment_status == 'completed':
-            if not self.payment_method:
-                errors['payment_method'] = "Payment method is required when payment status is 'Completed'."
-            elif not self.transaction_id:
-                errors['transaction_id'] = "Transaction ID is required when payment status is 'Completed'."
-
+        if not self.address:
+            errors['address'] = "Address is required."
+        if not self.city:
+            errors['city'] = "City is required."
+        if not self.postal_code:
+            errors['postal_code'] = "Postal code is required."
+        if self.country != 'United Kingdom':
+            errors['country'] = "Country must be United Kingdom."
+        if self.postal_code and not match(r'^[A-Z]{1,2}[0-9R][0-9A-Z]? ?[0-9][A-Z]{2}$', self.postal_code):
+            errors['postal_code'] = "Invalid UK postal code format."
         if errors:
             raise ValidationError(errors)
 
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"Order {self.id} by {self.user.email} ({self.status})"
-
 class OrderItem(models.Model):
-    """
-    Represents an item in an order with quantity, pricing tier, and unit type.
-    """
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items')
-    item = models.ForeignKey(Item, on_delete=models.PROTECT, related_name='order_items')
-    pricing_tier = models.ForeignKey(PricingTier, on_delete=models.PROTECT, related_name='order_items')
-    quantity = models.PositiveIntegerField()
-    unit_type = models.CharField(max_length=10, choices=(('pack', 'Pack'), ('pallet', 'Pallet')), default='pack')
-    per_unit_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit from PricingTierData")
-    per_pack_price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per pack (price per unit * units per pack)")
-    total_cost = models.DecimalField(max_digits=12, decimal_places=2, help_text="Total cost before discounts (per pack price * quantity or adjusted for pallet)")
-    user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True, related_name='orderitem_items')
+    order = models.ForeignKey('Order', on_delete=models.CASCADE, related_name='items')
+    item = models.ForeignKey('Item', on_delete=models.PROTECT, related_name='order_items')
+    pricing_tier = models.ForeignKey('PricingTier', on_delete=models.PROTECT, related_name='order_items')
+    pack_quantity = models.PositiveIntegerField()
+    unit_type = models.CharField(
+        max_length=10,
+        choices=(('pack', 'Pack'),),
+        default='pack',
+        editable=False,
+        help_text="Unit type is fixed to 'pack'."
+    )
+    user_exclusive_price = models.ForeignKey(
+        'UserExclusivePrice',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orderitem_items'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
@@ -1040,19 +1118,30 @@ class OrderItem(models.Model):
             models.Index(fields=['pricing_tier']),
             models.Index(fields=['created_at']),
         ]
+        unique_together = ('order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type')
         verbose_name = 'order item'
         verbose_name_plural = 'order items'
+
+    def convert_weight_to_kg(self, weight, weight_unit):
+        if weight is None or weight_unit is None:
+            return Decimal('0.00')
+        weight = Decimal(str(weight))
+        if weight_unit == 'lb':
+            return (weight * Decimal('0.453592')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'oz':
+            return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'g':
+            return (weight * Decimal('0.001')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif weight_unit == 'kg':
+            return weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return Decimal('0.00')
 
     @property
     def total_units(self):
         if not self.item or not self.item.product_variant:
             return 0
         units_per_pack = self.item.product_variant.units_per_pack
-        units_per_pallet = self.item.product_variant.units_per_pallet
-        if self.unit_type == 'pack':
-            return self.quantity * units_per_pack
-        else:
-            return self.quantity * units_per_pallet
+        return self.pack_quantity * units_per_pack
 
     def clean(self):
         errors = {}
@@ -1060,84 +1149,33 @@ class OrderItem(models.Model):
             errors['item'] = "Please select an item for this order entry."
         elif not self.pricing_tier:
             errors['pricing_tier'] = "Please select a pricing tier for this order entry."
-        elif self.quantity <= 0:
-            errors['quantity'] = "Quantity must be a positive number."
+        elif self.pack_quantity <= 0:
+            errors['pack_quantity'] = "Pack quantity must be a positive number."
 
         if self.item and self.pricing_tier:
             if self.pricing_tier.product_variant != self.item.product_variant:
                 errors['pricing_tier'] = "Pricing tier must belong to the same product variant as the item."
-            elif self.item.product_variant.show_units_per == 'pack' and self.unit_type == 'pallet':
-                errors['unit_type'] = "This item only supports pack pricing, not pallet pricing."
 
-            total_units = self.total_units
             units_per_pack = self.item.product_variant.units_per_pack
-            units_per_pallet = self.item.product_variant.units_per_pallet
-
-            if self.unit_type == 'pack':
-                if self.pricing_tier.tier_type == 'pallet':
-                    pass
-                elif self.quantity < self.pricing_tier.range_start:
-                    errors['quantity'] = (
-                        f"Quantity {self.quantity} is below the pricing tier range "
-                        f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
-                    )
-                elif not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
-                    errors['quantity'] = (
-                        f"Quantity {self.quantity} exceeds the pricing tier range "
-                        f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
-                    )
-            else:
-                if self.pricing_tier.tier_type != 'pallet':
-                    errors['pricing_tier'] = "Pricing tier must be 'Pallet' when unit type is 'Pallet'."
-                elif self.quantity < self.pricing_tier.range_start:
-                    errors['quantity'] = (
-                        f"Pallet quantity {self.quantity} is below the pricing tier range "
-                        f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
-                    )
-                elif not self.pricing_tier.no_end_range and self.quantity > self.pricing_tier.range_end:
-                    errors['quantity'] = (
-                        f"Pallet quantity {self.quantity} exceeds the pricing tier range "
-                        f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
-                    )
+            if self.pack_quantity < self.pricing_tier.range_start:
+                errors['pack_quantity'] = (
+                    f"Pack quantity {self.pack_quantity} is below the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                )
+            elif not self.pricing_tier.no_end_range and self.pack_quantity > self.pricing_tier.range_end:
+                errors['pack_quantity'] = (
+                    f"Pack quantity {self.pack_quantity} exceeds the pricing tier range "
+                    f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                )
 
             pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
             if not pricing_data:
                 errors['pricing_tier'] = "No pricing data found for this item and pricing tier."
-            else:
-                expected_per_unit_price = pricing_data.price
-                expected_per_pack_price = expected_per_unit_price * Decimal(units_per_pack)
-                
-                if self.per_unit_price != expected_per_unit_price:
-                    errors['per_unit_price'] = (
-                        f"Per unit price {self.per_unit_price} does not match the expected price {expected_per_unit_price}."
-                    )
-                elif self.per_pack_price != expected_per_pack_price:
-                    errors['per_pack_price'] = (
-                        f"Per pack price {self.per_pack_price} does not match the expected price {expected_per_pack_price}."
-                    )
-                else:
-                    if self.unit_type == 'pack':
-                        if self.pricing_tier.tier_type == 'pack':
-                            expected_total_cost = expected_per_pack_price * Decimal(self.quantity)
-                        else:
-                            total_units = Decimal(self.quantity) * Decimal(units_per_pack)
-                            equivalent_pallet_quantity = total_units / Decimal(units_per_pallet)
-                            expected_total_cost = equivalent_pallet_quantity * expected_per_pack_price * Decimal(units_per_pallet) / Decimal(units_per_pack)
-                    else:
-                        total_units = Decimal(self.quantity) * Decimal(units_per_pallet)
-                        equivalent_pack_quantity = total_units / Decimal(units_per_pack)
-                        expected_total_cost = equivalent_pack_quantity * expected_per_pack_price
-                    
-                    expected_total_cost = expected_total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                    if self.total_cost != expected_total_cost:
-                        errors['total_cost'] = (
-                            f"Total cost {self.total_cost} does not match the expected total cost {expected_total_cost}."
-                        )
 
         if self.item and self.item.track_inventory:
             total_units = self.total_units
             if self.item.stock is None or total_units > self.item.stock:
-                errors['quantity'] = (
+                errors['pack_quantity'] = (
                     f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0} units, Required: {total_units} units."
                 )
 
@@ -1150,17 +1188,67 @@ class OrderItem(models.Model):
         if errors:
             raise ValidationError(errors)
 
-    def subtotal(self):
-        if not self.total_cost or not self.quantity:
-            return Decimal('0.00')
-        discount_percentage = self.user_exclusive_price.discount_percentage if self.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        discounted_subtotal = self.total_cost * (Decimal('1.00') - discount)
-        return discounted_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
     def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
+        if not self.item:
+            raise ValidationError({"item": "OrderItem cannot be saved without an item."})
 
-    def __str__(self):
-        return f"{self.item} in order {self.order} ({self.quantity} {self.unit_type})"
+        with transaction.atomic():
+            existing_order_item = OrderItem.objects.filter(
+                order=self.order,
+                item=self.item,
+            ).exclude(pk=self.pk).first()
+
+            if existing_order_item:
+                existing_order_item.pack_quantity = self.pack_quantity
+                existing_order_item.pricing_tier = self.pricing_tier
+                existing_order_item.user_exclusive_price = self.user_exclusive_price
+                existing_order_item.unit_type = self.unit_type
+                existing_order_item.full_clean()
+                existing_order_item.save(*args, **kwargs)
+                try:
+                    self.order.update_order()
+                except Exception:
+                    pass
+                self.pk = existing_order_item.pk
+                return existing_order_item
+            else:
+                self.full_clean()
+                super().save(*args, **kwargs)
+                try:
+                    self.order.update_order()
+                except Exception:
+                    pass
+                return self
+
+# Signals
+@receiver(post_save, sender=Order)
+def create_order_items_from_cart(sender, instance, created, **kwargs):
+    if created:
+        with transaction.atomic():
+            # Get the user's cart
+            cart = Cart.objects.filter(user=instance.user).first()
+            if not cart:
+                raise ValidationError({"cart": "No cart found for this user."})
+
+            # Get cart items
+            cart_items = CartItem.objects.filter(cart=cart)
+            if not cart_items.exists():
+                raise ValidationError({"cart": "Cart is empty. Add items to proceed."})
+
+            # Create OrderItem entries
+            for cart_item in cart_items:
+                order_item = OrderItem(
+                    order=instance,
+                    item=cart_item.item,
+                    pricing_tier=cart_item.pricing_tier,
+                    pack_quantity=cart_item.pack_quantity,
+                    unit_type=cart_item.unit_type,
+                    user_exclusive_price=UserExclusivePrice.objects.filter(
+                        user=instance.user, item=cart_item.item
+                    ).first()
+                )
+                order_item.full_clean()
+                order_item.save()
+
+            # Clear the cart
+            cart_items.delete()

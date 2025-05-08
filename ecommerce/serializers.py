@@ -4,6 +4,7 @@ from ecommerce.models import (
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
 )
 from decimal import Decimal, ROUND_HALF_UP
+from django.core.exceptions import PermissionDenied
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -457,78 +458,224 @@ class CartSerializer(serializers.ModelSerializer):
         return representation
 
 class OrderItemSerializer(serializers.ModelSerializer):
+    order = serializers.PrimaryKeyRelatedField(queryset=Order.objects.all())
+    item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
+    pricing_tier = serializers.PrimaryKeyRelatedField(queryset=PricingTier.objects.all())
+    user_exclusive_price = serializers.PrimaryKeyRelatedField(
+        queryset=UserExclusivePrice.objects.all(), required=False, allow_null=True
+    )
+
     class Meta:
         model = OrderItem
-        fields = ['id', 'order', 'item', 'pricing_tier', 'quantity', 'unit_type', 'per_unit_price', 'per_pack_price', 'total_cost', 'user_exclusive_price', 'created_at']
-        read_only_fields = ['created_at', 'per_unit_price', 'per_pack_price', 'total_cost']
+        fields = ['id', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
+        read_only_fields = ['created_at', 'unit_type']
 
     def validate(self, data):
-        instance = OrderItem(**data)
-        
-        pricing_data = PricingTierData.objects.filter(
-            pricing_tier=instance.pricing_tier,
-            item=instance.item
-        ).first()
-        if not pricing_data:
-            raise serializers.ValidationError("No pricing data found for this item and pricing tier.")
+        instance_data = {
+            'order': data.get('order', getattr(self.instance, 'order', None)),
+            'item': data.get('item', getattr(self.instance, 'item', None)),
+            'pricing_tier': data.get('pricing_tier', getattr(self.instance, 'pricing_tier', None)),
+            'pack_quantity': data.get('pack_quantity', 1),
+            'unit_type': data.get('unit_type', 'pack'),
+            'user_exclusive_price': data.get('user_exclusive_price'),
+        }
+        instance = OrderItem(**instance_data)
 
-        units_per_pack = instance.item.product_variant.units_per_pack
-        units_per_pallet = instance.item.product_variant.units_per_pallet
-        per_unit_price = pricing_data.price
-        per_pack_price = per_unit_price * Decimal(units_per_pack)
-
-        if instance.unit_type == 'pack':
-            total_cost = per_pack_price * Decimal(instance.quantity)
-        else:
-            total_units = Decimal(instance.quantity) * Decimal(units_per_pallet)
-            equivalent_pack_quantity = total_units / Decimal(units_per_pack)
-            total_cost = equivalent_pack_quantity * per_pack_price
-        total_cost = total_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
-        data['per_unit_price'] = per_unit_price
-        data['per_pack_price'] = per_pack_price
-        data['total_cost'] = total_cost
-
-        if instance.quantity <= 0:
-            raise serializers.ValidationError("Quantity must be positive.")
-        # if instance.unit_type not in ['pack', 'pallet']:
-        #     raise serializers.ValidationError("Unit type must be 'pack' or 'pallet'.")
-        if instance.pricing_tier.product_variant != instance.item.product_variant:
+        if instance.pack_quantity <= 0:
+            raise serializers.ValidationError("Pack quantity must be positive.")
+        if instance.pricing_tier and instance.item and instance.pricing_tier.product_variant != instance.item.product_variant:
             raise serializers.ValidationError("Pricing tier must belong to the same product variant as the item.")
-        if instance.item.product_variant.show_units_per == 'pack' and instance.unit_type == 'pallet':
-            raise serializers.ValidationError("This item only supports pack pricing, not pallet pricing.")
         if instance.user_exclusive_price:
-            if instance.user_exclusive_price.item != instance.item:
+            if instance.item and instance.user_exclusive_price.item != instance.item:
                 raise serializers.ValidationError("User exclusive price must correspond to the selected item.")
-            if instance.user_exclusive_price.user != instance.order.user:
+            if instance.order and instance.user_exclusive_price.user != instance.order.user:
                 raise serializers.ValidationError("User exclusive price must correspond to the order's user.")
 
-        return data 
+        return data
+
+    def get_price_per_unit(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        return pricing_data.price if pricing_data else Decimal('0.00')
+
+    def get_price_per_pack(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        return Decimal('0.00')
+
+    def get_subtotal(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            units_per_pack = obj.item.product_variant.units_per_pack
+            per_pack_price = pricing_data.price * Decimal(units_per_pack)
+            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return Decimal('0.00')
+
+    def get_total(self, obj):
+        subtotal = self.get_subtotal(obj)
+        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def get_weight(self, obj):
+        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+        total_units = obj.total_units
+        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation.update({
+            'price_per_unit': self.get_price_per_unit(instance),
+            'price_per_pack': self.get_price_per_pack(instance),
+            'subtotal': self.get_subtotal(instance),
+            'total': self.get_total(instance),
+            'weight': self.get_weight(instance),
+        })
+        return representation
+
+    def create(self, validated_data):
+        order = validated_data.get('order')
+        item = validated_data.get('item')
+        pricing_tier = validated_data.get('pricing_tier')
+        pack_quantity = validated_data.get('pack_quantity', 1)
+        unit_type = validated_data.get('unit_type', 'pack')
+        user_exclusive_price = validated_data.get('user_exclusive_price')
+
+        order_item = OrderItem(
+            order=order,
+            item=item,
+            pricing_tier=pricing_tier,
+            pack_quantity=pack_quantity,
+            unit_type=unit_type,
+            user_exclusive_price=user_exclusive_price
+        )
+        order_item.full_clean()
+        order_item.save()
+        return order_item
+
+    def update(self, instance, validated_data):
+        instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
+        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
+        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+        instance.full_clean()
+        instance.save()
+        return instance
+
+class OrderItemDetailSerializer(serializers.ModelSerializer):
+    item = ItemSerializer(read_only=True)
+
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
+
+    def get_price_per_unit(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        return pricing_data.price if pricing_data else Decimal('0.00')
+
+    def get_price_per_pack(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        return Decimal('0.00')
+
+    def get_subtotal(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item.product_variant:
+            units_per_pack = obj.item.product_variant.units_per_pack
+            per_pack_price = pricing_data.price * Decimal(units_per_pack)
+            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return Decimal('0.00')
+
+    def get_total(self, obj):
+        subtotal = self.get_subtotal(obj)
+        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def get_weight(self, obj):
+        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+        total_units = obj.total_units
+        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation.update({
+            'price_per_unit': self.get_price_per_unit(instance),
+            'price_per_pack': self.get_price_per_pack(instance),
+            'subtotal': self.get_subtotal(instance),
+            'total': self.get_total(instance),
+            'weight': self.get_weight(instance),
+        })
+        return representation
 
 class OrderSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, read_only=True)
-    user = serializers.PrimaryKeyRelatedField(read_only=True)
+    items = OrderItemDetailSerializer(many=True, read_only=True)
 
     class Meta:
         model = Order
-        fields = [
-            'id', 'user', 'status', 'total_amount', 'shipping_address',
-            'payment_status', 'payment_method', 'transaction_id', 'items',
-        ]
-        read_only_fields = ['user']
+        fields = ['id', 'user', 'country', 'address', 'city', 'postal_code', 'items', 'vat', 'discount', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'country', 'created_at', 'updated_at']
 
     def validate(self, data):
-        total_amount = data.get('total_amount')
-        payment_status = data.get('payment_status')
-        payment_method = data.get('payment_method')
-        transaction_id = data.get('transaction_id')
-
-        if total_amount is not None and total_amount < 0:
-            raise serializers.ValidationError("Total amount cannot be negative.")
-        if payment_status == 'completed':
-            if not payment_method:
-                raise serializers.ValidationError("Payment method is required when payment status is 'completed'.")
-            if not transaction_id:
-                raise serializers.ValidationError("Transaction ID is required when payment status is 'completed'.")
-
+        if not data.get('address'):
+            raise serializers.ValidationError({"address": "Address is required."})
+        if not data.get('city'):
+            raise serializers.ValidationError({"city": "City is required."})
+        if not data.get('postal_code'):
+            raise serializers.ValidationError({"postal_code": "Postal code is required."})
         return data
+
+    def create(self, validated_data):
+        """Set the user from the request context if not provided."""
+        user = self.context['request'].user
+        if not user.is_authenticated:
+            raise PermissionDenied("Authentication required to create an order.")
+        validated_data['user'] = user
+        return super().create(validated_data)
+
+    def get_subtotal(self, obj):
+        return obj.calculate_subtotal()
+
+    def get_total(self, obj):
+        return obj.calculate_total()
+
+    def get_total_weight(self, obj):
+        return obj.calculate_total_weight()
+
+    def get_total_units(self, obj):
+        return obj.calculate_total_units_and_packs()[0]
+
+    def get_total_packs(self, obj):
+        return obj.calculate_total_units_and_packs()[1]
+
+    def to_representation(self, instance):
+        if not isinstance(instance, Order):
+            return {
+                'id': None,
+                'user': None,
+                'country': 'United Kingdom',
+                'address': None,
+                'city': None,
+                'postal_code': None,
+                'items': [],
+                'vat': str(Decimal('0.00')),
+                'discount': str(Decimal('0.00')),
+                'created_at': None,
+                'updated_at': None,
+                'subtotal': str(Decimal('0.00')),
+                'total': str(Decimal('0.00')),
+                'total_weight': str(Decimal('0.00')),
+                'total_units': 0,
+                'total_packs': 0,
+            }
+
+        representation = super().to_representation(instance)
+        representation.update({
+            'subtotal': str(self.get_subtotal(instance)),
+            'total': str(self.get_total(instance)),
+            'total_weight': str(self.get_total_weight(instance)),
+            'total_units': self.get_total_units(instance),
+            'total_packs': self.get_total_packs(instance),
+        })
+        return representation
+
