@@ -9,7 +9,11 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.db import transaction
 from re import match
-
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from django.core.files.base import ContentFile
+import re
+import io
 
 class Category(models.Model):
     """
@@ -967,35 +971,80 @@ def create_user_cart(sender, instance, created, **kwargs):
         Cart.objects.get_or_create(user=instance)
 
 
+class ShippingAddress(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='shipping_addresses')
+    street = models.CharField(max_length=255)
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20)
+    country = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'shipping address'
+        verbose_name_plural = 'shipping addresses'
+
+class BillingAddress(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='billing_addresses')
+    street = models.CharField(max_length=255)
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20)
+    country = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'billing address'
+        verbose_name_plural = 'billing addresses'
+
 class Order(models.Model):
+    STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('processing', 'Processing'),
+        ('shipped', 'Shipped'),
+        ('delivered', 'Delivered'),
+        ('cancelled', 'Cancelled'),
+    )
+    PAYMENT_STATUS_CHOICES = (
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+    )
+    PAYMENT_METHOD_CHOICES = (
+        ('credit_card', 'Credit Card'),
+        ('debit_card', 'Debit Card'),
+        ('paypal', 'PayPal'),
+        ('bank_transfer', 'Bank Transfer'),
+        ('manual_payment', 'Manual Payment'),
+    )
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='orders',
         help_text="The user associated with this order."
     )
-    country = models.CharField(
-        max_length=100,
-        default='United Kingdom',
-        editable=False,
-        help_text="Country is fixed to United Kingdom."
+    shipping_address = models.ForeignKey(
+        'ShippingAddress',
+        on_delete=models.PROTECT,
+        related_name='orders_shipping',
+        help_text="Shipping address for delivery."
     )
-    address = models.CharField(
-        max_length=255,
-        help_text="Street address for delivery."
+    billing_address = models.ForeignKey(
+        'BillingAddress',
+        on_delete=models.PROTECT,
+        related_name='orders_billing',
+        help_text="Billing address for payment."
     )
-    city = models.CharField(
-        max_length=100,
-        help_text="City for delivery."
-    )
-    postal_code = models.CharField(
-        max_length=20,
-        help_text="Postal code for delivery."
-    )
-    notes = models.TextField(
-        blank=True,
-        default="",
-        help_text="Optional notes for the order."
+    shipping_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0)],
+        default=Decimal('0.00'),
+        help_text="Shipping cost for the order."
     )
     vat = models.DecimalField(
         max_digits=5,
@@ -1009,6 +1058,58 @@ class Order(models.Model):
         default=Decimal('0.00'),
         help_text="Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR."
     )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        help_text="Current status of the order."
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending',
+        help_text="Payment status of the order."
+    )
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHOD_CHOICES,
+        default='manual_payment',
+        help_text="Payment method used for the order."
+    )
+    invoice = models.FileField(
+        upload_to='invoices/',
+        editable=False,
+        help_text="Generated invoice PDF for the order.",
+        null=True,
+        blank=True
+    )
+    delivery_note = models.FileField(
+        upload_to='delivery_notes/',
+        editable=False,
+        help_text="Generated delivery note PDF for the order.",
+        null=True,
+        blank=True
+    )
+    transaction_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Transaction ID for bank transfer payments."
+    )
+    payment_receipt = models.FileField(
+        upload_to='payment_receipts/',
+        blank=True,
+        help_text="Payment receipt for bank transfer payments."
+    )
+    refunded_transaction_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Transaction ID for refunded payments."
+    )
+    refunded_payment_receipt = models.FileField(
+        upload_to='refunded_payment_receipts/',
+        blank=True,
+        help_text="Payment receipt for refunded payments."
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1016,12 +1117,46 @@ class Order(models.Model):
         indexes = [
             models.Index(fields=['user']),
             models.Index(fields=['created_at']),
+            models.Index(fields=['status']),
+            models.Index(fields=['payment_status']),
         ]
         verbose_name = 'order'
         verbose_name_plural = 'orders'
 
+    def clean(self):
+        errors = {}
+        if self.payment_status == 'completed' and self.payment_method == 'bank_transfer':
+            if not self.transaction_id:
+                errors['transaction_id'] = "Transaction ID is required for completed bank transfer payments."
+            if not self.payment_receipt:
+                errors['payment_receipt'] = "Payment receipt is required for completed bank transfer payments."
+        if self.payment_status == 'refunded':
+            if not self.transaction_id:
+                errors['transaction_id'] = "Transaction ID is required for refunded payments."
+            if not self.payment_receipt:
+                errors['payment_receipt'] = "Payment receipt is required for refunded payments."
+            if not self.refunded_transaction_id:
+                errors['refunded_transaction_id'] = "Refunded transaction ID is required for refunded payments."
+            if not self.refunded_payment_receipt:
+                errors['refunded_payment_receipt'] = "Refunded payment receipt is required for refunded payments."
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        with transaction.atomic():
+            if not self.pk:
+                super().save(*args, **kwargs)
+            self.update_order()
+
+    def delete(self, *args, **kwargs):
+        if self.invoice:
+            self.invoice.storage.delete(self.invoice.name)
+        if self.delivery_note:
+            self.delivery_note.storage.delete(self.delivery_note.name)
+        super().delete(*args, **kwargs)
+
     def calculate_subtotal(self):
-        """Calculate the subtotal of all OrderItems, applying UserExclusivePrice discounts."""
         total = Decimal('0.00')
         for item in self.items.all():
             pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
@@ -1036,18 +1171,15 @@ class Order(models.Model):
                 total += item_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
-    def calculate_total_units_and_packs(self):
-        """Calculate total units and packs across all OrderItems."""
-        total_units = 0
-        total_packs = 0
-        for item in self.items.all():
-            units_per_pack = item.item.product_variant.units_per_pack
-            total_units += item.pack_quantity * units_per_pack
-            total_packs += item.pack_quantity
-        return total_units, total_packs
+    def calculate_total(self):
+        subtotal = self.calculate_subtotal()
+        discount_amount = (subtotal * self.discount) / Decimal('100.00')
+        discounted_subtotal = subtotal - discount_amount
+        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+        total = discounted_subtotal + vat_amount + self.shipping_cost
+        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total_weight(self):
-        """Calculate the total weight of all OrderItems."""
         total_weight = Decimal('0.00')
         for item in self.items.all():
             item_weight_kg = item.convert_weight_to_kg(item.item.weight, item.item.weight_unit)
@@ -1055,40 +1187,59 @@ class Order(models.Model):
             total_weight += item_weight_kg * Decimal(total_units)
         return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
-    def calculate_total(self):
-        """Calculate the total: Subtotal -> Apply Discount -> Add 20% VAT."""
-        subtotal = self.calculate_subtotal()
-        discount_amount = (subtotal * self.discount) / Decimal('100.00')
-        discounted_subtotal = subtotal - discount_amount
-        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
-        total = discounted_subtotal + vat_amount
-        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    def calculate_total_units_and_packs(self):
+        total_units = 0
+        total_packs = 0
+        for item in self.items.all():
+            if item.item.product_variant:
+                units_per_pack = item.item.product_variant.units_per_pack
+                total_packs += item.pack_quantity
+                total_units += item.pack_quantity * units_per_pack
+        return total_units, total_packs
 
     def update_order(self):
-        """Update order discount based on subtotal with UserExclusivePrice discounts."""
         subtotal = self.calculate_subtotal()
         self.discount = Decimal('10.00') if subtotal > Decimal('600.00') else Decimal('0.00')
+        for item in self.items.all():
+            item.full_clean()  # Validate OrderItems
         super().save()
 
-    def save(self, *args, **kwargs):
-        if not self.pk:
-            super().save(*args, **kwargs)
-        self.update_order()
+    def generate_invoice_pdf(self):
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=letter)
+        c.drawString(100, 750, f"Invoice for Order #{self.id}")
+        c.drawString(100, 730, f"User: {self.user.email}")
+        c.drawString(100, 710, f"Shipping Address: {self.shipping_address.street}, {self.shipping_address.city}, {self.shipping_address.postal_code}, {self.shipping_address.country}")
+        c.drawString(100, 690, f"Billing Address: {self.billing_address.street}, {self.billing_address.city}, {self.billing_address.postal_code}, {self.billing_address.country}")
+        c.drawString(100, 670, f"Subtotal: €{self.calculate_subtotal()}")
+        c.drawString(100, 650, f"Shipping Cost: €{self.shipping_cost}")
+        c.drawString(100, 630, f"VAT: {self.vat}%")
+        c.drawString(100, 610, f"Discount: {self.discount}%")
+        c.drawString(100, 590, f"Total: €{self.calculate_total()}")
+        c.drawString(100, 570, "Items:")
+        y = 550
+        for item in self.items.all():
+            c.drawString(120, y, f"{item.item.title} - {item.pack_quantity} packs")
+            y -= 20
+        c.showPage()
+        c.save()
+        buffer.seek(0)
+        return ContentFile(buffer.getvalue(), f"invoice_order_{self.id}.pdf")
 
-    def clean(self):
-        errors = {}
-        if not self.address:
-            errors['address'] = "Address is required."
-        if not self.city:
-            errors['city'] = "City is required."
-        if not self.postal_code:
-            errors['postal_code'] = "Postal code is required."
-        if self.country != 'United Kingdom':
-            errors['country'] = "Country must be United Kingdom."
-        if self.postal_code and not match(r'^[A-Z]{1,2}[0-9R][0-9A-Z]? ?[0-9][A-Z]{2}$', self.postal_code):
-            errors['postal_code'] = "Invalid UK postal code format."
-        if errors:
-            raise ValidationError(errors)
+    def generate_delivery_note_pdf(self):
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=letter)
+        c.drawString(100, 750, f"Delivery Note for Order #{self.id}")
+        c.drawString(100, 730, f"Shipping Address: {self.shipping_address.street}, {self.shipping_address.city}, {self.shipping_address.postal_code}, {self.shipping_address.country}")
+        c.drawString(100, 710, "Items:")
+        y = 690
+        for item in self.items.all():
+            c.drawString(120, y, f"{item.item.title} - {item.pack_quantity} packs")
+            y -= 20
+        c.showPage()
+        c.save()
+        buffer.seek(0)
+        return ContentFile(buffer.getvalue(), f"delivery_note_order_{self.id}.pdf")
 
 class OrderItem(models.Model):
     order = models.ForeignKey('Order', on_delete=models.CASCADE, related_name='items')
@@ -1151,53 +1302,48 @@ class OrderItem(models.Model):
             errors['pricing_tier'] = "Please select a pricing tier for this order entry."
         elif self.pack_quantity <= 0:
             errors['pack_quantity'] = "Pack quantity must be a positive number."
-
         if self.item and self.pricing_tier:
-            if self.pricing_tier.product_variant != self.item.product_variant:
+            if not hasattr(self.item, 'product_variant') or not self.item.product_variant:
+                errors['item'] = "Item must have a valid product variant."
+            elif self.pricing_tier.product_variant != self.item.product_variant:
                 errors['pricing_tier'] = "Pricing tier must belong to the same product variant as the item."
-
-            units_per_pack = self.item.product_variant.units_per_pack
-            if self.pack_quantity < self.pricing_tier.range_start:
-                errors['pack_quantity'] = (
-                    f"Pack quantity {self.pack_quantity} is below the pricing tier range "
-                    f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
-                )
-            elif not self.pricing_tier.no_end_range and self.pack_quantity > self.pricing_tier.range_end:
-                errors['pack_quantity'] = (
-                    f"Pack quantity {self.pack_quantity} exceeds the pricing tier range "
-                    f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
-                )
-
-            pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
-            if not pricing_data:
-                errors['pricing_tier'] = "No pricing data found for this item and pricing tier."
-
+            else:
+                units_per_pack = self.item.product_variant.units_per_pack
+                if self.pack_quantity < self.pricing_tier.range_start:
+                    errors['pack_quantity'] = (
+                        f"Pack quantity {self.pack_quantity} is below the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{'+' if self.pricing_tier.no_end_range else self.pricing_tier.range_end}."
+                    )
+                elif not self.pricing_tier.no_end_range and self.pack_quantity > self.pricing_tier.range_end:
+                    errors['pack_quantity'] = (
+                        f"Pack quantity {self.pack_quantity} exceeds the pricing tier range "
+                        f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
+                    )
+                pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
+                if not pricing_data:
+                    errors['pricing_tier'] = "No pricing data found for this item and pricing tier."
         if self.item and self.item.track_inventory:
             total_units = self.total_units
             if self.item.stock is None or total_units > self.item.stock:
                 errors['pack_quantity'] = (
                     f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0} units, Required: {total_units} units."
                 )
-
         if self.user_exclusive_price:
             if self.user_exclusive_price.item != self.item:
                 errors['user_exclusive_price'] = "User exclusive price must correspond to the selected item."
             elif self.user_exclusive_price.user != self.order.user:
                 errors['user_exclusive_price'] = "User exclusive price must correspond to the order's user."
-
         if errors:
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
         if not self.item:
             raise ValidationError({"item": "OrderItem cannot be saved without an item."})
-
         with transaction.atomic():
             existing_order_item = OrderItem.objects.filter(
                 order=self.order,
                 item=self.item,
             ).exclude(pk=self.pk).first()
-
             if existing_order_item:
                 existing_order_item.pack_quantity = self.pack_quantity
                 existing_order_item.pricing_tier = self.pricing_tier
@@ -1222,20 +1368,18 @@ class OrderItem(models.Model):
 
 # Signals
 @receiver(post_save, sender=Order)
-def create_order_items_from_cart(sender, instance, created, **kwargs):
+def handle_order_creation(sender, instance, created, **kwargs):
     if created:
         with transaction.atomic():
-            # Get the user's cart
+            # Generate invoice
+            instance.invoice.save(f"invoice_order_{instance.id}.pdf", instance.generate_invoice_pdf())
+            # Create OrderItems from CartItems
             cart = Cart.objects.filter(user=instance.user).first()
             if not cart:
                 raise ValidationError({"cart": "No cart found for this user."})
-
-            # Get cart items
             cart_items = CartItem.objects.filter(cart=cart)
             if not cart_items.exists():
                 raise ValidationError({"cart": "Cart is empty. Add items to proceed."})
-
-            # Create OrderItem entries
             for cart_item in cart_items:
                 order_item = OrderItem(
                     order=instance,
@@ -1249,6 +1393,9 @@ def create_order_items_from_cart(sender, instance, created, **kwargs):
                 )
                 order_item.full_clean()
                 order_item.save()
-
-            # Clear the cart
             cart_items.delete()
+
+@receiver(post_save, sender=Order)
+def handle_payment_status_change(sender, instance, **kwargs):
+    if instance.payment_status == 'completed' and not instance.delivery_note:
+        instance.delivery_note.save(f"delivery_note_order_{instance.id}.pdf", instance.generate_delivery_note_pdf())

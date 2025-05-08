@@ -4,7 +4,7 @@ from ecommerce.views import (
     CategoryViewSet, ProductViewSet, ProductImageViewSet, ProductVariantViewSet,
     PricingTierViewSet, PricingTierDataViewSet, TableFieldViewSet, ItemViewSet,
     ItemImageViewSet, ItemDataViewSet, UserExclusivePriceViewSet,
-    CartViewSet, CartItemViewSet, OrderViewSet, OrderItemViewSet
+    CartViewSet, CartItemViewSet, OrderViewSet, OrderItemViewSet, ShippingAddressViewSet, BillingAddressViewSet
 )
 
 router = DefaultRouter()
@@ -23,6 +23,8 @@ router.register(r'carts', CartViewSet)
 router.register(r'cart-items', CartItemViewSet)
 router.register(r'orders', OrderViewSet)
 router.register(r'order-items', OrderItemViewSet)
+router.register(r'shipping-addresses', ShippingAddressViewSet)
+router.register(r'billing-addresses', BillingAddressViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

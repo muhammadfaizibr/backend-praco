@@ -1,12 +1,13 @@
 from django import forms
 from django.contrib import admin, messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from .models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
 )
 from decimal import Decimal, ROUND_HALF_UP
 from django.utils.html import format_html
+
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at', 'grok_side_view')
@@ -841,8 +842,15 @@ class CartAdmin(admin.ModelAdmin):
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
-    fields = ('item', 'pricing_tier', 'pack_quantity', 'user_exclusive_price', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
-    readonly_fields = ('created_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    fields = (
+        'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price',
+        'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight',
+        'created_at', 'updated_at'
+    )
+    readonly_fields = (
+        'unit_type', 'created_at', 'updated_at',
+        'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight'
+    )
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     def get_price_per_unit(self, obj):
@@ -885,22 +893,54 @@ class OrderItemInline(admin.TabularInline):
         }
 
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at', 'grok_side_view')
-    search_fields = ('user__email', 'address', 'city', 'postal_code')
-    list_filter = ('created_at', 'updated_at')
+    list_display = (
+        'user', 'status', 'payment_status', 'payment_method',
+        'get_subtotal', 'shipping_cost', 'vat', 'discount', 'get_total',
+        'get_total_units', 'get_total_packs', 'get_total_weight',
+        'transaction_id', 'refunded_transaction_id',
+        'created_at', 'updated_at', 'grok_side_view'
+    )
+    search_fields = (
+        'user__email', 'shipping_address__street', 'billing_address__street',
+        'transaction_id', 'refunded_transaction_id'
+    )
+    list_filter = ('status', 'payment_status', 'payment_method', 'created_at', 'updated_at')
     ordering = ('user', 'created_at')
     inlines = [OrderItemInline]
-    readonly_fields = ('created_at', 'updated_at', 'get_subtotal', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'country')
+    readonly_fields = (
+        'invoice', 'delivery_note',
+        'created_at', 'updated_at', 'get_subtotal', 'get_total',
+        'get_total_units', 'get_total_packs', 'get_total_weight'
+    )
 
     fieldsets = (
         ('Basic Information', {
-            'fields': ('user', 'country', 'address', 'city', 'postal_code'),
+            'fields': (
+                'user', 'status', 'payment_status', 'payment_method',
+                'shipping_address', 'billing_address'
+            ),
             'description': 'Core order details.'
         }),
         ('Pricing Details', {
-            'fields': ('get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight'),
+            'fields': (
+                'get_subtotal', 'shipping_cost', 'vat', 'discount', 'get_total',
+                'get_total_units', 'get_total_packs', 'get_total_weight'
+            ),
             'classes': ('inline-group',),
             'description': 'Pricing, units, weight, and discount information.'
+        }),
+        ('Payment Information', {
+            'fields': (
+                'transaction_id', 'payment_receipt',
+                'refunded_transaction_id', 'refunded_payment_receipt'
+            ),
+            'classes': ('inline-group',),
+            'description': 'Payment and refund details.'
+        }),
+        ('Documents', {
+            'fields': ('invoice', 'delivery_note'),
+            'classes': ('inline-group',),
+            'description': 'Generated documents for the order (read-only).'
         }),
         ('Metadata', {
             'fields': ('created_at', 'updated_at'),
@@ -940,6 +980,15 @@ class OrderAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
+        except ObjectDoesNotExist as e:
+            # Handle RelatedObjectDoesNotExist errors
+            field_name = str(e).split('has no ')[1].strip('.')
+            messages.error(
+                request,
+                f"Please select a valid {field_name.replace('_', ' ').title()} for the order.",
+                extra_tags='custom-error'
+            )
+            raise
 
     def grok_side_view(self, obj):
         """Grok Side View: Quick summary of the order."""
@@ -952,20 +1001,33 @@ class OrderAdmin(admin.ModelAdmin):
         }
 
 class OrderItemAdmin(admin.ModelAdmin):
+    list_display = (
+        'order', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type',
+        'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total',
+        'get_weight', 'user_exclusive_price', 'created_at', 'updated_at',
+        'grok_side_view'
+    )
     search_fields = ('order__user__email', 'item__sku')
-    list_display = ('order', 'item', 'pricing_tier', 'pack_quantity', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
-    list_filter = ('created_at', 'updated_at')
-    readonly_fields = ('created_at', 'updated_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    list_filter = ('unit_type', 'created_at', 'updated_at')
+    readonly_fields = (
+        'unit_type', 'created_at', 'updated_at',
+        'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight'
+    )
     ordering = ('order', 'item')
     autocomplete_fields = ['order', 'item', 'pricing_tier', 'user_exclusive_price']
 
     fieldsets = (
         ('Basic Information', {
-            'fields': ('order', 'item', 'pricing_tier', 'pack_quantity'),
+            'fields': (
+                'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type'
+            ),
             'description': 'Core order item details.'
         }),
         ('Pricing Details', {
-            'fields': ('get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
+            'fields': (
+                'get_price_per_unit', 'get_price_per_pack', 'get_subtotal',
+                'get_total', 'get_weight', 'user_exclusive_price'
+            ),
             'classes': ('inline-group',),
             'description': 'Pricing, weight, and discount information. Note: Pricing and weight fields are automatically calculated and read-only.'
         }),

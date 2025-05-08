@@ -104,25 +104,6 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
-            name='Order',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('country', models.CharField(default='United Kingdom', editable=False, help_text='Country is fixed to United Kingdom.', max_length=100)),
-                ('address', models.CharField(help_text='Street address for delivery.', max_length=255)),
-                ('city', models.CharField(help_text='City for delivery.', max_length=100)),
-                ('postal_code', models.CharField(help_text='Postal code for delivery.', max_length=20)),
-                ('vat', models.DecimalField(decimal_places=2, default=Decimal('20.00'), help_text='VAT percentage (e.g., 20 for 20%).', max_digits=5)),
-                ('discount', models.DecimalField(decimal_places=2, default=Decimal('0.00'), help_text='Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR.', max_digits=5)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('user', models.ForeignKey(help_text='The user associated with this order.', on_delete=django.db.models.deletion.CASCADE, related_name='orders', to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                'verbose_name': 'order',
-                'verbose_name_plural': 'orders',
-            },
-        ),
-        migrations.CreateModel(
             name='PricingTierData',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -238,24 +219,6 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
-            name='OrderItem',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('pack_quantity', models.PositiveIntegerField()),
-                ('unit_type', models.CharField(choices=[('pack', 'Pack')], default='pack', editable=False, help_text="Unit type is fixed to 'pack'.", max_length=10)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('item', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='order_items', to='ecommerce.item')),
-                ('order', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='items', to='ecommerce.order')),
-                ('pricing_tier', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='order_items', to='ecommerce.pricingtier')),
-                ('user_exclusive_price', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='orderitem_items', to='ecommerce.userexclusiveprice')),
-            ],
-            options={
-                'verbose_name': 'order item',
-                'verbose_name_plural': 'order items',
-            },
-        ),
-        migrations.CreateModel(
             name='CartItem',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -285,14 +248,7 @@ class Migration(migrations.Migration):
             model_name='itemimage',
             index=models.Index(fields=['item'], name='ecommerce_i_item_id_c1583a_idx'),
         ),
-        migrations.AddIndex(
-            model_name='order',
-            index=models.Index(fields=['user'], name='ecommerce_o_user_id_20253d_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='order',
-            index=models.Index(fields=['created_at'], name='ecommerce_o_created_86a742_idx'),
-        ),
+
         migrations.AddIndex(
             model_name='pricingtierdata',
             index=models.Index(fields=['item', 'pricing_tier'], name='ecommerce_p_item_id_b5e459_idx'),
@@ -384,22 +340,6 @@ class Migration(migrations.Migration):
         migrations.AlterUniqueTogether(
             name='userexclusiveprice',
             unique_together={('user', 'item')},
-        ),
-        migrations.AddIndex(
-            model_name='orderitem',
-            index=models.Index(fields=['order', 'item'], name='ecommerce_o_order_i_0b16ac_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='orderitem',
-            index=models.Index(fields=['pricing_tier'], name='ecommerce_o_pricing_704473_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='orderitem',
-            index=models.Index(fields=['created_at'], name='ecommerce_o_created_9448b8_idx'),
-        ),
-        migrations.AlterUniqueTogether(
-            name='orderitem',
-            unique_together={('order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'updated_at')},
         ),
         migrations.AddIndex(
             model_name='cartitem',

@@ -6,13 +6,13 @@ from rest_framework import status
 from rest_framework.decorators import action
 from ecommerce.models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
-    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, ShippingAddress, BillingAddress
 )
 from ecommerce.serializers import (
     CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer,
     PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer,
     ItemImageSerializer, ItemDataSerializer, UserExclusivePriceSerializer,
-    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer, OrderItemDetailSerializer
+    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer, OrderItemDetailSerializer, ShippingAddressSerializer, BillingAddressSerializer
 )
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
 from django.db.models import Q
@@ -614,7 +614,11 @@ class OrderViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(queryset, many=True)
             return Response(serializer.data)
         except ValidationError as e:
+            print(f"Validation error in list: {str(e)}")
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"Unexpected error in list: {str(e)}")
+            return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get_queryset(self):
         """Return orders for the authenticated user."""
@@ -626,10 +630,23 @@ class OrderViewSet(viewsets.ModelViewSet):
         """Create a new order for the authenticated user."""
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to create an order.")
+        print(f"Creating order with payload: {request.data}")
+        # try:
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        print(f"Order created successfully: {serializer.data}")
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+        # except ValidationError as e:
+            # print(f"Validation error in create: {e.detail}")
+            # return Response({"errors": e.detail}, status=status.HTTP_400_BAD_REQUEST)
+        # except Exception as e:
+            # print(f"Unexpected error in create: {str(e)}")
+            # return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def perform_create(self, serializer):
+        """Ensure the order is created with the authenticated user."""
+        serializer.save(user=self.request.user)
 
 class OrderItemViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
@@ -774,3 +791,22 @@ class OrderItemViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+
+class AddressViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        model = self.serializer_class.Meta.model
+        return model.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class ShippingAddressViewSet(AddressViewSet):
+    serializer_class = ShippingAddressSerializer
+    queryset = ShippingAddress.objects.all()
+
+class BillingAddressViewSet(AddressViewSet):
+    serializer_class = BillingAddressSerializer
+    queryset = BillingAddress.objects.all()

@@ -1,10 +1,11 @@
 from rest_framework import serializers
 from ecommerce.models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
-    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, ShippingAddress, BillingAddress
 )
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -561,12 +562,28 @@ class OrderItemSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+class ShippingAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShippingAddress
+        fields = ['id', 'street', 'city', 'state', 'postal_code', 'country']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+class BillingAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BillingAddress
+        fields = ['id', 'street', 'city', 'state', 'postal_code', 'country']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
 class OrderItemDetailSerializer(serializers.ModelSerializer):
-    item = ItemSerializer(read_only=True)
+    item = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderItem
         fields = ['id', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
+
+    def get_item(self, obj):
+        from ecommerce.serializers import ItemSerializer
+        return ItemSerializer(obj.item, context=self.context).data
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
@@ -610,28 +627,67 @@ class OrderItemDetailSerializer(serializers.ModelSerializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemDetailSerializer(many=True, read_only=True)
+    shipping_address = serializers.PrimaryKeyRelatedField(
+        queryset=ShippingAddress.objects.all(),
+        required=True,
+        allow_null=False
+    )
+    billing_address = serializers.PrimaryKeyRelatedField(
+        queryset=BillingAddress.objects.all(),
+        required=True,
+        allow_null=False
+    )
+    shipping_address_detail = ShippingAddressSerializer(source='shipping_address', read_only=True)
+    billing_address_detail = BillingAddressSerializer(source='billing_address', read_only=True)
 
     class Meta:
         model = Order
-        fields = ['id', 'user', 'country', 'address', 'city', 'postal_code', 'items', 'vat', 'discount', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'user', 'country', 'created_at', 'updated_at']
+        fields = [
+            'id', 'user', 'shipping_address', 'billing_address',
+            'shipping_address_detail', 'billing_address_detail',
+            'shipping_cost', 'vat', 'discount', 'status', 'payment_status',
+            'payment_method', 'items', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'items', 'created_at', 'updated_at', 'shipping_address_detail', 'billing_address_detail']
 
     def validate(self, data):
-        if not data.get('address'):
-            raise serializers.ValidationError({"address": "Address is required."})
-        if not data.get('city'):
-            raise serializers.ValidationError({"city": "City is required."})
-        if not data.get('postal_code'):
-            raise serializers.ValidationError({"postal_code": "Postal code is required."})
+        print(f"Raw input data: {self.initial_data}")
+        print(f"Validated data: {data}")
+        payment_method = data.get('payment_method')
+        if not payment_method:
+            raise serializers.ValidationError({"payment_method": "Payment method is required."})
+        valid_payment_methods = [choice[0] for choice in Order.PAYMENT_METHOD_CHOICES]
+        if payment_method not in valid_payment_methods:
+            raise serializers.ValidationError({"payment_method": f"Invalid payment method. Must be one of: {', '.join(valid_payment_methods)}."})
+
+        shipping_cost = data.get('shipping_cost')
+        if shipping_cost is None or shipping_cost < 0:
+            raise serializers.ValidationError({"shipping_cost": "Shipping cost must be a non-negative number."})
+
         return data
 
     def create(self, validated_data):
-        """Set the user from the request context if not provided."""
+        print(f"Creating order with validated data: {validated_data}")
         user = self.context['request'].user
         if not user.is_authenticated:
             raise PermissionDenied("Authentication required to create an order.")
         validated_data['user'] = user
-        return super().create(validated_data)
+        with transaction.atomic():
+            order = super().create(validated_data)
+            # Create OrderItems from CartItems
+            cart = Cart.objects.filter(user=user).first()
+            if cart:
+                for cart_item in cart.items.all():
+                    OrderItem.objects.create(
+                        order=order,
+                        item=cart_item.item,
+                        pricing_tier=cart_item.pricing_tier,
+                        pack_quantity=cart_item.pack_quantity,
+                        unit_type=cart_item.unit_type,
+                        user_exclusive_price=cart_item.user_exclusive_price
+                    )
+                cart.items.all().delete()  # Clear cart after order creation
+            return order
 
     def get_subtotal(self, obj):
         return obj.calculate_subtotal()
@@ -653,13 +709,17 @@ class OrderSerializer(serializers.ModelSerializer):
             return {
                 'id': None,
                 'user': None,
-                'country': 'United Kingdom',
-                'address': None,
-                'city': None,
-                'postal_code': None,
-                'items': [],
+                'shipping_address': None,
+                'billing_address': None,
+                'shipping_address_detail': None,
+                'billing_address_detail': None,
+                'shipping_cost': str(Decimal('0.00')),
                 'vat': str(Decimal('0.00')),
                 'discount': str(Decimal('0.00')),
+                'status': 'pending',
+                'payment_status': 'pending',
+                'payment_method': None,
+                'items': [],
                 'created_at': None,
                 'updated_at': None,
                 'subtotal': str(Decimal('0.00')),
@@ -678,4 +738,3 @@ class OrderSerializer(serializers.ModelSerializer):
             'total_packs': self.get_total_packs(instance),
         })
         return representation
-
