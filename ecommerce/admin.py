@@ -3,7 +3,7 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from .models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
-    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, BillingAddress, ShippingAddress
 )
 from decimal import Decimal, ROUND_HALF_UP
 from django.utils.html import format_html
@@ -1082,6 +1082,37 @@ class OrderItemAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
+class ShippingAddressAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'country', 'created_at')
+    list_filter = ('country', 'city', 'created_at')
+    search_fields = ('first_name', 'last_name', 'telephone_number', 'street', 'city', 'postal_code', 'country', 'user__email')
+    readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'fields': ('user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'state', 'postal_code', 'country')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+class BillingAddressAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'country', 'created_at')
+    list_filter = ('country', 'city', 'created_at')
+    search_fields = ('first_name', 'last_name', 'telephone_number', 'street', 'city', 'postal_code', 'country', 'user__email')
+    readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'fields': ('user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'state', 'postal_code', 'country')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
 # Register all models with their respective admin classes
 admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)
@@ -1098,3 +1129,5 @@ admin.site.register(Cart, CartAdmin)
 admin.site.register(CartItem, CartItemAdmin)
 admin.site.register(Order, OrderAdmin)
 admin.site.register(OrderItem, OrderItemAdmin)
+admin.site.register(BillingAddress, BillingAddressAdmin)
+admin.site.register(ShippingAddress, ShippingAddressAdmin)

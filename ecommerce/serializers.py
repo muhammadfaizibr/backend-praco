@@ -565,13 +565,13 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class ShippingAddressSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShippingAddress
-        fields = ['id', 'street', 'city', 'state', 'postal_code', 'country']
+        fields = ['id', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'state', 'postal_code', 'country']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 class BillingAddressSerializer(serializers.ModelSerializer):
     class Meta:
         model = BillingAddress
-        fields = ['id', 'street', 'city', 'state', 'postal_code', 'country']
+        fields = ['id', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'state', 'postal_code', 'country']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 class OrderItemDetailSerializer(serializers.ModelSerializer):

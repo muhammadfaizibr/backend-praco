@@ -30,7 +30,9 @@ SECRET_KEY = 'django-insecure-fzsmd9bn+cm+y0&!*co%ob9=v4#v6-%!tqbf5s_itq(zb=u9^c
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    "api.praco.co.uk"
+]
 
 # Application definition
 INSTALLED_APPS = [
@@ -165,6 +167,7 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://api.praco.co.uk"
 ]
 
 UNFOLD = {

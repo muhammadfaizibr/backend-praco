@@ -8,12 +8,14 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.db import transaction
-from re import match
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 from django.core.files.base import ContentFile
-import re
 import io
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+
 
 class Category(models.Model):
     """
@@ -973,6 +975,9 @@ def create_user_cart(sender, instance, created, **kwargs):
 
 class ShippingAddress(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='shipping_addresses')
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    telephone_number = models.CharField(max_length=20)
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=100, blank=True)
@@ -987,6 +992,9 @@ class ShippingAddress(models.Model):
 
 class BillingAddress(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='billing_addresses')
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    telephone_number = models.CharField(max_length=20)
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=100, blank=True)
@@ -1000,246 +1008,198 @@ class BillingAddress(models.Model):
         verbose_name_plural = 'billing addresses'
 
 class Order(models.Model):
-    STATUS_CHOICES = (
-        ('pending', 'Pending'),
-        ('processing', 'Processing'),
-        ('shipped', 'Shipped'),
-        ('delivered', 'Delivered'),
-        ('cancelled', 'Cancelled'),
-    )
-    PAYMENT_STATUS_CHOICES = (
-        ('pending', 'Pending'),
-        ('completed', 'Completed'),
-        ('failed', 'Failed'),
-        ('refunded', 'Refunded'),
-    )
-    PAYMENT_METHOD_CHOICES = (
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    shipping_address = models.ForeignKey('ShippingAddress', on_delete=models.SET_NULL, null=True)
+    billing_address = models.ForeignKey('BillingAddress', on_delete=models.SET_NULL, null=True)
+    shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    vat = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=20, default='pending')
+    payment_status = models.CharField(max_length=20, default='pending')
+    payment_method = models.CharField(max_length=50)
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    payment_receipt = models.FileField(upload_to='receipts/', blank=True, null=True)
+    refunded_transaction_id = models.CharField(max_length=100, blank=True, null=True)
+    refunded_payment_receipt = models.FileField(upload_to='refund_receipts/', blank=True, null=True)
+    invoice = models.FileField(upload_to='invoices/', null=True, blank=True)
+    delivery_note = models.FileField(upload_to='delivery_notes/', null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    PAYMENT_METHOD_CHOICES = [
         ('credit_card', 'Credit Card'),
         ('debit_card', 'Debit Card'),
         ('paypal', 'PayPal'),
         ('bank_transfer', 'Bank Transfer'),
         ('manual_payment', 'Manual Payment'),
-    )
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='orders',
-        help_text="The user associated with this order."
-    )
-    shipping_address = models.ForeignKey(
-        'ShippingAddress',
-        on_delete=models.PROTECT,
-        related_name='orders_shipping',
-        help_text="Shipping address for delivery."
-    )
-    billing_address = models.ForeignKey(
-        'BillingAddress',
-        on_delete=models.PROTECT,
-        related_name='orders_billing',
-        help_text="Billing address for payment."
-    )
-    shipping_cost = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(0)],
-        default=Decimal('0.00'),
-        help_text="Shipping cost for the order."
-    )
-    vat = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
-        default=Decimal('20.00'),
-        help_text="VAT percentage (e.g., 20 for 20%)."
-    )
-    discount = models.DecimalField(
-        max_digits=5,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        help_text="Discount percentage (e.g., 10 for 10%). Automatically set to 10% if subtotal > 600 EUR."
-    )
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default='pending',
-        help_text="Current status of the order."
-    )
-    payment_status = models.CharField(
-        max_length=20,
-        choices=PAYMENT_STATUS_CHOICES,
-        default='pending',
-        help_text="Payment status of the order."
-    )
-    payment_method = models.CharField(
-        max_length=20,
-        choices=PAYMENT_METHOD_CHOICES,
-        default='manual_payment',
-        help_text="Payment method used for the order."
-    )
-    invoice = models.FileField(
-        upload_to='invoices/',
-        editable=False,
-        help_text="Generated invoice PDF for the order.",
-        null=True,
-        blank=True
-    )
-    delivery_note = models.FileField(
-        upload_to='delivery_notes/',
-        editable=False,
-        help_text="Generated delivery note PDF for the order.",
-        null=True,
-        blank=True
-    )
-    transaction_id = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="Transaction ID for bank transfer payments."
-    )
-    payment_receipt = models.FileField(
-        upload_to='payment_receipts/',
-        blank=True,
-        help_text="Payment receipt for bank transfer payments."
-    )
-    refunded_transaction_id = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="Transaction ID for refunded payments."
-    )
-    refunded_payment_receipt = models.FileField(
-        upload_to='refunded_payment_receipts/',
-        blank=True,
-        help_text="Payment receipt for refunded payments."
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=['user']),
-            models.Index(fields=['created_at']),
-            models.Index(fields=['status']),
-            models.Index(fields=['payment_status']),
-        ]
-        verbose_name = 'order'
-        verbose_name_plural = 'orders'
-
-    def clean(self):
-        errors = {}
-        if self.payment_status == 'completed' and self.payment_method == 'bank_transfer':
-            if not self.transaction_id:
-                errors['transaction_id'] = "Transaction ID is required for completed bank transfer payments."
-            if not self.payment_receipt:
-                errors['payment_receipt'] = "Payment receipt is required for completed bank transfer payments."
-        if self.payment_status == 'refunded':
-            if not self.transaction_id:
-                errors['transaction_id'] = "Transaction ID is required for refunded payments."
-            if not self.payment_receipt:
-                errors['payment_receipt'] = "Payment receipt is required for refunded payments."
-            if not self.refunded_transaction_id:
-                errors['refunded_transaction_id'] = "Refunded transaction ID is required for refunded payments."
-            if not self.refunded_payment_receipt:
-                errors['refunded_payment_receipt'] = "Refunded payment receipt is required for refunded payments."
-        if errors:
-            raise ValidationError(errors)
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        with transaction.atomic():
-            if not self.pk:
-                super().save(*args, **kwargs)
-            self.update_order()
-
-    def delete(self, *args, **kwargs):
-        if self.invoice:
-            self.invoice.storage.delete(self.invoice.name)
-        if self.delivery_note:
-            self.delivery_note.storage.delete(self.delivery_note.name)
-        super().delete(*args, **kwargs)
+    ]
 
     def calculate_subtotal(self):
-        total = Decimal('0.00')
-        for item in self.items.all():
-            pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
-            if pricing_data and item.item.product_variant:
-                units_per_pack = item.item.product_variant.units_per_pack
-                per_pack_price = pricing_data.price * Decimal(units_per_pack)
-                item_subtotal = per_pack_price * Decimal(item.pack_quantity)
-                if item.user_exclusive_price:
-                    discount_percentage = item.user_exclusive_price.discount_percentage
-                    discount = discount_percentage / Decimal('100.00')
-                    item_subtotal = item_subtotal * (Decimal('1.00') - discount)
-                total += item_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        from ecommerce.serializers import OrderItemDetailSerializer
+        return sum(OrderItemDetailSerializer().get_subtotal(item) for item in self.items.all())
 
     def calculate_total(self):
         subtotal = self.calculate_subtotal()
-        discount_amount = (subtotal * self.discount) / Decimal('100.00')
-        discounted_subtotal = subtotal - discount_amount
-        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
-        total = discounted_subtotal + vat_amount + self.shipping_cost
-        return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return (subtotal + self.shipping_cost + self.vat - self.discount).quantize(Decimal('0.01'))
 
     def calculate_total_weight(self):
-        total_weight = Decimal('0.00')
-        for item in self.items.all():
-            item_weight_kg = item.convert_weight_to_kg(item.item.weight, item.item.weight_unit)
-            total_units = item.total_units
-            total_weight += item_weight_kg * Decimal(total_units)
-        return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        from ecommerce.serializers import OrderItemDetailSerializer
+        return sum(OrderItemDetailSerializer().get_weight(item) for item in self.items.all())
 
     def calculate_total_units_and_packs(self):
         total_units = 0
         total_packs = 0
         for item in self.items.all():
-            if item.item.product_variant:
-                units_per_pack = item.item.product_variant.units_per_pack
-                total_packs += item.pack_quantity
-                total_units += item.pack_quantity * units_per_pack
+            total_packs += item.pack_quantity
+            total_units += item.pack_quantity * (item.item.product_variant.units_per_pack if item.item.product_variant else 1)
         return total_units, total_packs
-
-    def update_order(self):
-        subtotal = self.calculate_subtotal()
-        self.discount = Decimal('10.00') if subtotal > Decimal('600.00') else Decimal('0.00')
-        for item in self.items.all():
-            item.full_clean()  # Validate OrderItems
-        super().save()
 
     def generate_invoice_pdf(self):
         buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=letter)
-        c.drawString(100, 750, f"Invoice for Order #{self.id}")
-        c.drawString(100, 730, f"User: {self.user.email}")
-        c.drawString(100, 710, f"Shipping Address: {self.shipping_address.street}, {self.shipping_address.city}, {self.shipping_address.postal_code}, {self.shipping_address.country}")
-        c.drawString(100, 690, f"Billing Address: {self.billing_address.street}, {self.billing_address.city}, {self.billing_address.postal_code}, {self.billing_address.country}")
-        c.drawString(100, 670, f"Subtotal: €{self.calculate_subtotal()}")
-        c.drawString(100, 650, f"Shipping Cost: €{self.shipping_cost}")
-        c.drawString(100, 630, f"VAT: {self.vat}%")
-        c.drawString(100, 610, f"Discount: {self.discount}%")
-        c.drawString(100, 590, f"Total: €{self.calculate_total()}")
-        c.drawString(100, 570, "Items:")
-        y = 550
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+        elements = []
+        styles = getSampleStyleSheet()
+        title_style = styles['Heading1']
+        normal_style = styles['Normal']
+        bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+
+        # Header
+        elements.append(Paragraph("Invoice", title_style))
+        elements.append(Spacer(1, 0.2*cm))
+        elements.append(Paragraph(f"Order ID: {self.id}", normal_style))
+        elements.append(Paragraph(f"Date: {self.created_at.strftime('%Y-%m-%d')}", normal_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Addresses
+        shipping = self.shipping_address
+        billing = self.billing_address
+        elements.append(Paragraph("Shipping Address:", bold_style))
+        elements.append(Paragraph(f"{shipping.first_name} {shipping.last_name}", normal_style))
+        elements.append(Paragraph(f"{shipping.street}, {shipping.city}, {shipping.state} {shipping.postal_code}, {shipping.country}", normal_style))
+        elements.append(Paragraph(f"Telephone: {shipping.telephone_number}", normal_style))
+        elements.append(Spacer(1, 0.3*cm))
+        elements.append(Paragraph("Billing Address:", bold_style))
+        elements.append(Paragraph(f"{billing.first_name} {billing.last_name}", normal_style))
+        elements.append(Paragraph(f"{billing.street}, {billing.city}, {billing.state} {billing.postal_code}, {billing.country}", normal_style))
+        elements.append(Paragraph(f"Telephone: {billing.telephone_number}", normal_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Items Table
+        from ecommerce.serializers import OrderItemDetailSerializer
+        data = [['Item', 'Quantity (Packs)', 'Unit Type', 'Subtotal', 'Total']]
         for item in self.items.all():
-            c.drawString(120, y, f"{item.item.title} - {item.pack_quantity} packs")
-            y -= 20
-        c.showPage()
-        c.save()
+            subtotal = OrderItemDetailSerializer().get_subtotal(item)
+            total = OrderItemDetailSerializer().get_total(item)
+            data.append([
+                item.item.title,
+                str(item.pack_quantity),
+                item.unit_type,
+                f"€{subtotal:.2f}",
+                f"€{total:.2f}"
+            ])
+        table = Table(data)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Totals
+        elements.append(Paragraph(f"Subtotal: €{self.calculate_subtotal():.2f}", bold_style))
+        elements.append(Paragraph(f"Shipping Cost: €{self.shipping_cost:.2f}", normal_style))
+        elements.append(Paragraph(f"VAT (20%): €{self.vat:.2f}", normal_style))
+        elements.append(Paragraph(f"Discount: €{self.discount:.2f}", normal_style))
+        elements.append(Paragraph(f"Total: €{self.calculate_total():.2f}", bold_style))
+
+        # Build PDF
+        doc.build(elements)
         buffer.seek(0)
-        return ContentFile(buffer.getvalue(), f"invoice_order_{self.id}.pdf")
+        return buffer
 
     def generate_delivery_note_pdf(self):
         buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=letter)
-        c.drawString(100, 750, f"Delivery Note for Order #{self.id}")
-        c.drawString(100, 730, f"Shipping Address: {self.shipping_address.street}, {self.shipping_address.city}, {self.shipping_address.postal_code}, {self.shipping_address.country}")
-        c.drawString(100, 710, "Items:")
-        y = 690
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+        elements = []
+        styles = getSampleStyleSheet()
+        title_style = styles['Heading1']
+        normal_style = styles['Normal']
+        bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+
+        # Header
+        elements.append(Paragraph("Delivery Note", title_style))
+        elements.append(Spacer(1, 0.2*cm))
+        elements.append(Paragraph(f"Order ID: {self.id}", normal_style))
+        elements.append(Paragraph(f"Date: {self.created_at.strftime('%Y-%m-%d')}", normal_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Shipping Address
+        shipping = self.shipping_address
+        elements.append(Paragraph("Shipping Address:", bold_style))
+        elements.append(Paragraph(f"{shipping.first_name} {shipping.last_name}", normal_style))
+        elements.append(Paragraph(f"{shipping.street}, {shipping.city}, {shipping.state} {shipping.postal_code}, {shipping.country}", normal_style))
+        elements.append(Paragraph(f"Telephone: {shipping.telephone_number}", normal_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Items Table
+        from ecommerce.serializers import OrderItemDetailSerializer
+        data = [['Item', 'Quantity (Packs)', 'Unit Type', 'Weight (kg)']]
         for item in self.items.all():
-            c.drawString(120, y, f"{item.item.title} - {item.pack_quantity} packs")
-            y -= 20
-        c.showPage()
-        c.save()
+            weight = OrderItemDetailSerializer().get_weight(item)
+            data.append([
+                item.item.title,
+                str(item.pack_quantity),
+                item.unit_type,
+                f"{weight:.2f}"
+            ])
+        table = Table(data)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Total Weight
+        total_weight = self.calculate_total_weight()
+        elements.append(Paragraph(f"Total Weight: {total_weight:.2f} kg", bold_style))
+
+        # Build PDF
+        doc.build(elements)
         buffer.seek(0)
-        return ContentFile(buffer.getvalue(), f"delivery_note_order_{self.id}.pdf")
+        return buffer
+
+    def generate_and_save_pdfs(self):
+        """Generate and save invoice and delivery note PDFs."""
+        invoice_buffer = self.generate_invoice_pdf()
+        delivery_note_buffer = self.generate_delivery_note_pdf()
+
+        self.invoice.save(
+            f'invoice_order_{self.id}.pdf',
+            ContentFile(invoice_buffer.getvalue()),
+            save=False
+        )
+        self.delivery_note.save(
+            f'delivery_note_order_{self.id}.pdf',
+            ContentFile(delivery_note_buffer.getvalue()),
+            save=False
+        )
+
+        invoice_buffer.close()
+        delivery_note_buffer.close()
+
 
 class OrderItem(models.Model):
     order = models.ForeignKey('Order', on_delete=models.CASCADE, related_name='items')
