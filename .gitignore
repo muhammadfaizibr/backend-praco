@@ -1,0 +1,27 @@
+
+
+*.py[cod] pycache/ *.pyc *.pyo *.pyd .Python env/ venv/ ENV/ env.bak/ venv.bak/
+
+
+
+*.log *.pot *.pyc pycache/ local_settings.py db.sqlite3 db.sqlite3-journal media/ migrations/
+
+
+
+.idea/ .vscode/ *.sublime-project *.sublime-workspace
+
+OS generated files
+
+.DS_Store Thumbs.db
+
+
+
+.coverage coverage.xml *.cover *.py,cover .tox/ .nox/ .pytest_cache/
+
+
+
+build/ dist/ *.egg *.egg-info/ .installed.cfg pip-log.txt pip-delete-this-directory.txt
+
+
+
+*.swp *~ .profile .bash_history .cache .hypothesis/ .dmypy.json dmypy.json
