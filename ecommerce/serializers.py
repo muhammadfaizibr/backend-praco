@@ -6,6 +6,10 @@ from ecommerce.models import (
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -646,47 +650,148 @@ class OrderSerializer(serializers.ModelSerializer):
             'id', 'user', 'shipping_address', 'billing_address',
             'shipping_address_detail', 'billing_address_detail',
             'shipping_cost', 'vat', 'discount', 'status', 'payment_status',
-            'payment_method', 'items', 'created_at', 'updated_at'
+            'payment_method', 'payment_verified', 'transaction_id',
+            'payment_receipt', 'refunded_transaction_id', 'refunded_payment_receipt',
+            'paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note',
+            'created_at', 'updated_at', 'items'
         ]
-        read_only_fields = ['id', 'user', 'items', 'created_at', 'updated_at', 'shipping_address_detail', 'billing_address_detail']
+        read_only_fields = [
+            'id', 'user', 'items', 'created_at', 'updated_at',
+            'shipping_address_detail', 'billing_address_detail',
+            'payment_method', 'shipping_cost', 'vat', 'discount',
+            'invoice', 'delivery_note', 'paid_receipt', 'refunded_receipt',
+            'transaction_id', 'payment_receipt'
+        ]
+
+    def validate_status(self, value):
+        """Normalize status to match STATUS_CHOICES."""
+        status_map = {
+            'pending': 'PENDING',
+            'processing': 'PROCESSING',
+            'shipped': 'SHIPPED',
+            'delivered': 'DELIVERED',
+            'cancelled': 'CANCELLED',
+            'returned': 'RETURNED'
+        }
+        normalized = value.upper() if value else value
+        if normalized in status_map:
+            normalized = status_map[normalized]
+        if normalized not in dict(Order.STATUS_CHOICES):
+            raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+        return normalized
+
+    def validate_payment_status(self, value):
+        """Normalize payment_status to match PAYMENT_STATUS_CHOICES."""
+        payment_status_map = {
+            'pending': 'PENDING',
+            'completed': 'COMPLETED',
+            'failed': 'FAILED',
+            'refunded': 'REFUNDED'
+        }
+        normalized = value.upper() if value else value
+        if normalized in payment_status_map:
+            normalized = payment_status_map[normalized]
+        if normalized not in dict(Order.PAYMENT_STATUS_CHOICES):
+            raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+        return normalized
 
     def validate(self, data):
-        print(f"Raw input data: {self.initial_data}")
-        print(f"Validated data: {data}")
-        payment_method = data.get('payment_method')
-        if not payment_method:
-            raise serializers.ValidationError({"payment_method": "Payment method is required."})
-        valid_payment_methods = [choice[0] for choice in Order.PAYMENT_METHOD_CHOICES]
-        if payment_method not in valid_payment_methods:
-            raise serializers.ValidationError({"payment_method": f"Invalid payment method. Must be one of: {', '.join(valid_payment_methods)}."})
+        logger.info(f"Raw input data: {self.initial_data}")
+        logger.info(f"Validated data: {data}")
+        payment_status = data.get('payment_status', self.instance.payment_status if self.instance else 'PENDING')
+        payment_verified = data.get('payment_verified', self.instance.payment_verified if self.instance else False)
 
-        shipping_cost = data.get('shipping_cost')
-        if shipping_cost is None or shipping_cost < 0:
-            raise serializers.ValidationError({"shipping_cost": "Shipping cost must be a non-negative number."})
-
+        errors = {}
+        if payment_verified:
+            if payment_status != 'COMPLETED':
+                errors['payment_status'] = 'Payment status must be COMPLETED when payment is verified.'
+            if not data.get('transaction_id') and not (self.instance and self.instance.transaction_id):
+                errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
+            if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
+                errors['payment_receipt'] = 'Payment receipt is required when payment is verified.'
+        if payment_status == 'COMPLETED':
+            if not data.get('transaction_id') and not (self.instance and self.instance.transaction_id):
+                errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
+            if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
+                errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
+        elif payment_status == 'REFUNDED':
+            if not data.get('transaction_id') and not (self.instance and self.instance.transaction_id):
+                errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
+            if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
+                errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
+            if not data.get('refunded_transaction_id') and not (self.instance and self.instance.refunded_transaction_id):
+                errors['refunded_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
+            if not data.get('refunded_payment_receipt') and not (self.instance and self.instance.refunded_payment_receipt):
+                errors['refunded_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
+            if self.instance and not self.instance.paid_receipt:
+                errors['paid_receipt'] = 'Paid receipt must exist when payment status is Refunded.'
+        if errors:
+            raise serializers.ValidationError(errors)
         return data
 
     def create(self, validated_data):
-        print(f"Creating order with validated data: {validated_data}")
+        logger.info(f"Creating order with validated data: {validated_data}")
         user = self.context['request'].user
         if not user.is_authenticated:
             raise PermissionDenied("Authentication required to create an order.")
         validated_data['user'] = user
+        validated_data['payment_method'] = 'manual_payment'
+
         with transaction.atomic():
             order = super().create(validated_data)
-            # Create OrderItems from CartItems
+            logger.info(f"Order {order.id} created for user {user.id}")
+
+            from .models import Cart, CartItem, UserExclusivePrice
             cart = Cart.objects.filter(user=user).first()
-            if cart:
+            if cart and cart.items.exists():
                 for cart_item in cart.items.all():
-                    OrderItem.objects.create(
-                        order=order,
-                        item=cart_item.item,
-                        pricing_tier=cart_item.pricing_tier,
-                        pack_quantity=cart_item.pack_quantity,
-                        unit_type=cart_item.unit_type,
-                        user_exclusive_price=cart_item.user_exclusive_price
-                    )
-                cart.items.all().delete()  # Clear cart after order creation
+                    if cart_item.item and cart_item.pricing_tier and cart_item.pack_quantity:
+                        user_exclusive_price = cart_item.user_exclusive_price
+                        if user_exclusive_price is None:
+                            try:
+                                user_exclusive_price, created = UserExclusivePrice.objects.get_or_create(
+                                    user=user,
+                                    item=cart_item.item,
+                                    defaults={}
+                                )
+                                if created:
+                                    logger.info(f"Created default UserExclusivePrice for user {user.id}, item {cart_item.item.id}")
+                            except Exception as e:
+                                logger.error(f"Failed to create UserExclusivePrice for user {user.id}, item {cart_item.item.id}: {str(e)}")
+                                user_exclusive_price = None
+                        OrderItem.objects.create(
+                            order=order,
+                            item=cart_item.item,
+                            pricing_tier=cart_item.pricing_tier,
+                            pack_quantity=cart_item.pack_quantity,
+                            unit_type=cart_item.unit_type,
+                            user_exclusive_price=user_exclusive_price
+                        )
+                        logger.info(f"Created OrderItem for order {order.id}, item {cart_item.item.id}")
+                    else:
+                        logger.warning(f"Skipping invalid cart item for order {order.id}: {cart_item}")
+                cart.items.all().delete()
+                logger.info(f"Cleared cart for user {user.id}")
+            else:
+                logger.warning(f"No valid cart items found for user {user.id} during order {order.id} creation")
+
+            order.calculate_total()
+            order.generate_and_save_pdfs()
+            if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUNDED']:
+                order.generate_and_save_payment_receipts()
+            logger.info(f"PDFs and receipts generated for order {order.id}")
+
+            return order
+
+    def update(self, instance, validated_data):
+        logger.info(f"Updating order {instance.id} with validated data: {validated_data}")
+        with transaction.atomic():
+            order = super().update(instance, validated_data)
+            order.calculate_total()
+            order.generate_and_save_pdfs()
+            if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUNDED']:
+                order.generate_and_save_payment_receipts()
+            logger.info(f"Order {order.id} updated with PDFs and receipts")
             return order
 
     def get_subtotal(self, obj):
@@ -716,9 +821,18 @@ class OrderSerializer(serializers.ModelSerializer):
                 'shipping_cost': str(Decimal('0.00')),
                 'vat': str(Decimal('0.00')),
                 'discount': str(Decimal('0.00')),
-                'status': 'pending',
-                'payment_status': 'pending',
-                'payment_method': None,
+                'status': 'PENDING',
+                'payment_status': 'PENDING',
+                'payment_method': 'manual_payment',
+                'payment_verified': False,
+                'transaction_id': None,
+                'payment_receipt': None,
+                'refunded_transaction_id': None,
+                'refunded_payment_receipt': None,
+                'paid_receipt': None,
+                'refunded_receipt': None,
+                'invoice': None,
+                'delivery_note': None,
                 'items': [],
                 'created_at': None,
                 'updated_at': None,
@@ -731,6 +845,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
         representation = super().to_representation(instance)
         representation.update({
+            'shipping_cost': str(instance.shipping_cost),
             'subtotal': str(self.get_subtotal(instance)),
             'total': str(self.get_total(instance)),
             'total_weight': str(self.get_total_weight(instance)),

@@ -6,9 +6,10 @@ from django.contrib.auth.hashers import check_password
 class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["email", "first_name", "last_name", "company_name", "password"]
+        fields = ["email", "first_name", "last_name", "company_name", "receive_marketing", "password"]
         extra_kwargs = {
-            'password': {'write_only': True, 'min_length': 8, 'max_length': 20}
+            'password': {'write_only': True, 'min_length': 8, 'max_length': 20},
+            'receive_marketing': {'required': False, 'allow_null': True}
         }
 
     def validate_email(self, value):
@@ -27,19 +28,18 @@ class UserLoginSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "email", "first_name", "last_name", "company_name"]
+        fields = ["id", "email", "first_name", "last_name", "company_name", "receive_marketing"]
         extra_kwargs = {
-            'email': {'read_only': True},  # Prevent updating email
-            'id': {'read_only': True},     # Prevent updating ID
+            'email': {'read_only': True},
+            'id': {'read_only': True},
         }
 
     def get_fields(self):
         fields = super().get_fields()
-        # For PATCH, allow only updatable fields
         if self.context.get('request') and self.context['request'].method == 'PATCH':
             return {
                 key: field for key, field in fields.items()
-                if key in ['first_name', 'last_name', 'company_name']
+                if key in ['first_name', 'last_name', 'company_name', 'receive_marketing']
             }
         return fields
 
@@ -54,30 +54,51 @@ class EmailAuthenticationSerializer(serializers.Serializer):
         required=True,
         error_messages={'required': 'Verification code is required.', 'blank': 'Verification code cannot be blank.'}
     )
+    authentication_type = serializers.ChoiceField(
+        choices=['signup', 'forgot_password'],
+        required=True,
+        error_messages={'required': 'Authentication type is required.', 'invalid_choice': 'Invalid authentication type.'}
+    )
 
     def validate(self, attrs):
         email = attrs.get('email').lower()
         code = attrs.get('code')
+        authentication_type = attrs.get('authentication_type')
 
-        # Check if email exists
-        attrs['exists'] = User.objects.filter(email=email).exists()
-        
-        # Send OTP only if email exists (for forget password) or doesn't exist (for signup)
-        # Context can be passed via request to differentiate flows, but here we send OTP regardless
+        # Check user existence
+        user_exists = User.objects.filter(email=email).exists()
+        attrs['exists'] = user_exists
+
+        # Validate based on authentication type
+        if authentication_type == 'signup' and user_exists:
+            raise serializers.ValidationError("An account with this email already exists.")
+        if authentication_type == 'forgot_password' and not user_exists:
+            raise serializers.ValidationError("No account found with this email address.")
+
+        # Create HTML content for the email
+        html_body = f"""
+        <html>
+            <body>
+                <h2>Your Verification Code</h2>
+                <p>Your verification code is: <strong>{code}</strong></p>
+                <p>Please use this code to complete your {'registration' if authentication_type == 'signup' else 'password reset'}.</p>
+                <p>If you did not request this, please ignore this email.</p>
+            </body>
+        </html>
+        """
+
         try:
-            print(code)
-            # send_mail(
-            #     'Your OTP Code',
-            #     f'Your verification code is {code}',
-            #     'from@example.com',
-            #     [email],
-            #     fail_silently=False,
-            # )
+            send_email(
+                subject='Your OTP Code',
+                body=html_body,
+                receiver=email,
+                is_html=True
+            )
         except Exception as e:
             raise serializers.ValidationError(f"Failed to send OTP: {str(e)}")
-        
+
         return attrs
-    
+
 class UserResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(
         max_length=255,

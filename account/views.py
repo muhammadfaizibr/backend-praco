@@ -13,7 +13,7 @@ from account.serializers import (
 )
 from account.auth import UserBackend
 from backend_praco.renderers import CustomRenderer
-from backend_praco.utils import get_tokens_for_user
+from backend_praco.utils import get_tokens_for_user, send_email
 from account.models import User
 import random
 
@@ -75,14 +75,13 @@ class EmailAuthenticationView(APIView):
         if serializer.is_valid(raise_exception=True):
             email = serializer.validated_data['email']
             exists = serializer.validated_data['exists']
-
-            # For forget password, require exists: true; for signup, require exists: false
-            # Frontend handles flow-specific logic
+            authentication_type = serializer.validated_data['authentication_type']
             return Response(
                 {
                     "success": True,
                     "exists": exists,
-                    "message": f"Verification code sent to {email}. Check inbox and spam folder."
+                    "message": f"Verification code sent to {email}. Check inbox and spam folder.",
+                    "authentication_type": authentication_type
                 },
                 status=status.HTTP_200_OK
             )
@@ -117,3 +116,23 @@ class UserUpdatePasswordView(APIView):
                 {"message": "Password updated successfully."},
                 status=status.HTTP_200_OK
             )
+
+class TestEmailView(APIView):
+    renderer_classes = [CustomRenderer]
+
+    def post(self, request):
+        email = request.data.get('email', 'test@example.com')
+        success = send_email(
+            subject="Test Email",
+            body="This is a test email from Django.",
+            receiver=email
+        )
+        if success:
+            return Response(
+                {"message": f"Test email sent to {email}"},
+                status=status.HTTP_200_OK
+            )
+        return Response(
+            {"message": "Failed to send test email"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

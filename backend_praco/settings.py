@@ -31,7 +31,8 @@ SECRET_KEY = 'django-insecure-fzsmd9bn+cm+y0&!*co%ob9=v4#v6-%!tqbf5s_itq(zb=u9^c
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    "api.praco.co.uk"
+    "api.praco.co.uk",
+    "127.0.0.1"
 ]
 
 # Application definition
@@ -341,3 +342,13 @@ KEDITOR_5_CONFIGS = {
         }
     }
 }
+
+
+
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'  # Use SMTP for production
+EMAIL_HOST = 'smtp.gmail.com'  # Example: Gmail SMTP server
+EMAIL_PORT = 587  # TLS port for Gmail
+EMAIL_USE_TLS = True  # Use TLS for secure connection
+EMAIL_HOST_USER = 'siddiqui.faizmuhammad@gmail.com'  # Your email address
+EMAIL_HOST_PASSWORD = 'gbumssawbuhptjcr'  # App-specific password (not your regular password)
+DEFAULT_FROM_EMAIL = 'siddiqui.faizmuhammad@gmail.com'  # Default sender email

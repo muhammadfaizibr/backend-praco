@@ -6,7 +6,13 @@ from .models import (
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, BillingAddress, ShippingAddress
 )
 from decimal import Decimal, ROUND_HALF_UP
-from django.utils.html import format_html
+import logging
+from django.urls import reverse
+from django.core.mail import EmailMessage
+from django.conf import settings
+from django.http import HttpResponseRedirect
+from django.core.files.base import ContentFile
+from django.urls import reverse, path
 
 
 class CategoryAdmin(admin.ModelAdmin):
@@ -839,6 +845,8 @@ class CartAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
+logger = logging.getLogger(__name__)
+
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 1
@@ -854,63 +862,128 @@ class OrderItemInline(admin.TabularInline):
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     def get_price_per_unit(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        return pricing_data.price if pricing_data else Decimal('0.00')
-    get_price_per_unit.short_description = "Price Per Unit"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            return pricing_data.price if pricing_data else Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_price_per_pack(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
-        return Decimal('0.00')
-    get_price_per_pack.short_description = "Price Per Pack"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            if pricing_data and obj.item.product_variant:
+                return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+            return Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_subtotal(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
-            per_pack_price = pricing_data.price * Decimal(units_per_pack)
-            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        return Decimal('0.00')
-    get_subtotal.short_description = "Subtotal"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            if pricing_data and obj.item.product_variant:
+                units_per_pack = obj.item.product_variant.units_per_pack
+                per_pack_price = pricing_data.price * Decimal(units_per_pack)
+                return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_total(self, obj):
-        subtotal = self.get_subtotal(obj)
-        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_total.short_description = "Total"
+        try:
+            subtotal = self.get_subtotal(obj)
+            discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+            discount = discount_percentage / Decimal('100.00')
+            return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except Exception as e:
+            # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_weight(self, obj):
-        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
-        total_units = obj.total_units
-        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_weight.short_description = "Weight"
+        try:
+            item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+            total_units = obj.total_units
+            return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except Exception as e:
+            # logger.error(f"Error getting weight for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
+class OrderAdminForm(forms.ModelForm):
+    class Meta:
+        model = Order
+        fields = [
+            'user', 'shipping_address', 'billing_address', 'status',
+            'payment_status', 'payment_verified', 'transaction_id',
+            'payment_receipt', 'refunded_transaction_id', 'refunded_payment_receipt',
+            'vat', 'discount'
+        ]  # Include only editable fields
+        exclude = [
+            'paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note',
+            'payment_method', 'shipping_cost', 'created_at', 'updated_at'
+        ]  # Explicitly exclude non-editable fields
+
+    def clean_status(self):
+        status = self.cleaned_data.get('status')
+        status_map = {
+            'pending': 'PENDING',
+            'processing': 'PROCESSING',
+            'shipped': 'SHIPPED',
+            'delivered': 'DELIVERED',
+            'cancelled': 'CANCELLED',
+            'returned': 'RETURNED'
+        }
+        normalized = status.upper() if status else status
+        if normalized in status_map:
+            normalized = status_map[normalized]
+        if normalized not in dict(Order.STATUS_CHOICES):
+            raise ValidationError(f'"{status}" is not a valid choice.')
+        return normalized
+
+    def clean_payment_status(self):
+        payment_status = self.cleaned_data.get('payment_status')
+        payment_status_map = {
+            'pending': 'PENDING',
+            'completed': 'COMPLETED',
+            'failed': 'FAILED',
+            'refunded': 'REFUNDED'
+        }
+        normalized = payment_status.upper() if payment_status else payment_status
+        if normalized in payment_status_map:
+            normalized = payment_status_map[normalized]
+        if normalized not in dict(Order.PAYMENT_STATUS_CHOICES):
+            raise ValidationError(f'"{payment_status}" is not a valid choice.')
+        return normalized
+
 class OrderAdmin(admin.ModelAdmin):
+    form = OrderAdminForm
     list_display = (
         'user', 'status', 'payment_status', 'payment_method',
-        'get_subtotal', 'shipping_cost', 'vat', 'discount', 'get_total',
+        'get_subtotal', 'vat', 'discount', 'shipping_cost', 'get_total',
         'get_total_units', 'get_total_packs', 'get_total_weight',
         'transaction_id', 'refunded_transaction_id',
-        'created_at', 'updated_at', 'grok_side_view'
+        'created_at', 'updated_at', 'grok_side_view',
+        'invoice_actions', 'delivery_note_actions',
+        'paid_receipt_actions', 'refunded_receipt_actions'
     )
     search_fields = (
         'user__email', 'shipping_address__street', 'billing_address__street',
         'transaction_id', 'refunded_transaction_id'
     )
     list_filter = ('status', 'payment_status', 'payment_method', 'created_at', 'updated_at')
-    ordering = ('user', 'created_at')
+    ordering = ('-created_at',)
     inlines = [OrderItemInline]
     readonly_fields = (
-        'invoice', 'delivery_note',
-        'created_at', 'updated_at', 'get_subtotal', 'get_total',
-        'get_total_units', 'get_total_packs', 'get_total_weight'
+        'payment_method', 'shipping_cost', 'invoice', 'delivery_note',
+        'paid_receipt', 'refunded_receipt', 'created_at', 'updated_at',
+        'get_subtotal', 'get_total', 'get_total_units', 'get_total_packs',
+        'get_total_weight'
     )
 
     fieldsets = (
@@ -923,7 +996,7 @@ class OrderAdmin(admin.ModelAdmin):
         }),
         ('Pricing Details', {
             'fields': (
-                'get_subtotal', 'shipping_cost', 'vat', 'discount', 'get_total',
+                'get_subtotal', 'vat', 'discount', 'shipping_cost', 'get_total',
                 'get_total_units', 'get_total_packs', 'get_total_weight'
             ),
             'classes': ('inline-group',),
@@ -931,14 +1004,14 @@ class OrderAdmin(admin.ModelAdmin):
         }),
         ('Payment Information', {
             'fields': (
-                'transaction_id', 'payment_receipt',
+                'payment_verified', 'transaction_id', 'payment_receipt',
                 'refunded_transaction_id', 'refunded_payment_receipt'
             ),
             'classes': ('inline-group',),
             'description': 'Payment and refund details.'
         }),
         ('Documents', {
-            'fields': ('invoice', 'delivery_note'),
+            'fields': ('invoice', 'delivery_note', 'paid_receipt', 'refunded_receipt'),
             'classes': ('inline-group',),
             'description': 'Generated documents for the order (read-only).'
         }),
@@ -949,60 +1022,332 @@ class OrderAdmin(admin.ModelAdmin):
         }),
     )
 
+    def get_readonly_fields(self, request, obj=None):
+        """Dynamically determine read-only fields."""
+        readonly = list(self.readonly_fields)
+        if obj:
+            readonly.extend(['paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note', 'payment_method', 'shipping_cost'])
+        return readonly
+
     def get_subtotal(self, obj):
-        return obj.calculate_subtotal()
-    get_subtotal.short_description = "Subtotal"
+        try:
+            return f"€{obj.calculate_subtotal().quantize(Decimal('0.01')):.2f}"
+        except Exception as e:
+            logger.error(f"Error getting subtotal for order {obj.id}: {str(e)}")
+            return "€0.00"
 
     def get_total(self, obj):
-        return obj.calculate_total()
-    get_total.short_description = "Total"
+        try:
+            return f"€{obj.calculate_total().quantize(Decimal('0.01')):.2f}"
+        except Exception as e:
+            logger.error(f"Error getting total for order {obj.id}: {str(e)}")
+            return "€0.00"
 
     def get_total_weight(self, obj):
-        return obj.calculate_total_weight()
-    get_total_weight.short_description = "Total Weight"
+        try:
+            return f"{obj.calculate_total_weight().quantize(Decimal('0.01')):.2f} kg"
+        except Exception as e:
+            logger.error(f"Error getting total weight for order {obj.id}: {str(e)}")
+            return "0.00 kg"
 
     def get_total_units(self, obj):
-        total_units, _ = obj.calculate_total_units_and_packs()
-        return total_units
-    get_total_units.short_description = "Total Units"
+        try:
+            total_units, _ = obj.calculate_total_units_and_packs()
+            return total_units
+        except Exception as e:
+            logger.error(f"Error getting total units for order {obj.id}: {str(e)}")
+            return 0
 
     def get_total_packs(self, obj):
-        _, total_packs = obj.calculate_total_units_and_packs()
-        return total_packs
-    get_total_packs.short_description = "Total Packs"
+        try:
+            _, total_packs = obj.calculate_total_units_and_packs()
+            return total_packs
+        except Exception as e:
+            logger.error(f"Error getting total packs for order {obj.id}: {str(e)}")
+            return 0
+
+    def grok_side_view(self, obj):
+        try:
+            return f"Order for {obj.user.email} (Total: {self.get_total(obj)})"
+        except Exception as e:
+            logger.error(f"Error generating grok side view for order {obj.id}: {str(e)}")
+            return "Error generating order summary"
+
+    def invoice_actions(self, obj):
+        invoice_url = obj.invoice.url if obj.invoice else "#"
+        buttons = [
+            f'<a href="{invoice_url}" target="_blank">View</a>',
+            f'<a href="{reverse("admin:send_invoice_email", args=[obj.id])}">Send Email</a>',
+            f'<a href="{reverse("admin:regenerate_invoice", args=[obj.id])}">Regenerate</a>',
+        ]
+        return admin.utils.format_html(" | ".join(buttons))
+    invoice_actions.short_description = "Invoice Actions"
+
+    def delivery_note_actions(self, obj):
+        delivery_note_url = obj.delivery_note.url if obj.delivery_note else "#"
+        buttons = [
+            f'<a href="{delivery_note_url}" target="_blank">View</a>',
+            f'<a href="{reverse("admin:send_delivery_note_email", args=[obj.id])}">Send Email</a>',
+            f'<a href="{reverse("admin:regenerate_delivery_note", args=[obj.id])}">Regenerate</a>',
+        ]
+        return admin.utils.format_html(" | ".join(buttons))
+    delivery_note_actions.short_description = "Delivery Note Actions"
+
+    def paid_receipt_actions(self, obj):
+        paid_receipt_url = obj.paid_receipt.url if obj.paid_receipt else "#"
+        buttons = [
+            f'<a href="{paid_receipt_url}" target="_blank">View</a>',
+            f'<a href="{reverse("admin:send_paid_receipt_email", args=[obj.id])}">Send Email</a>',
+            f'<a href="{reverse("admin:regenerate_paid_receipt", args=[obj.id])}">Regenerate</a>',
+        ]
+        return admin.utils.format_html(" | ".join(buttons))
+    paid_receipt_actions.short_description = "Paid Receipt Actions"
+
+    def refunded_receipt_actions(self, obj):
+        refunded_receipt_url = obj.refunded_receipt.url if obj.refunded_receipt else "#"
+        buttons = [
+            f'<a href="{refunded_receipt_url}" target="_blank">View</a>',
+            f'<a href="{reverse("admin:send_refunded_receipt_email", args=[obj.id])}">Send Email</a>',
+            f'<a href="{reverse("admin:regenerate_refunded_receipt", args=[obj.id])}">Regenerate</a>',
+        ]
+        return admin.utils.format_html(" | ".join(buttons))
+    refunded_receipt_actions.short_description = "Refunded Receipt Actions"
 
     def save_model(self, request, obj, form, change):
         try:
             obj.full_clean()
-            obj.save()
+            super().save_model(request, obj, form, change)
+            obj.calculate_total()
+            obj.generate_and_save_pdfs()
+            if obj.payment_verified or obj.payment_status in ['COMPLETED', 'REFUNDED']:
+                obj.generate_and_save_payment_receipts()
+            messages.success(request, "Order saved successfully.")
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
-        except ObjectDoesNotExist as e:
-            # Handle RelatedObjectDoesNotExist errors
-            field_name = str(e).split('has no ')[1].strip('.')
-            messages.error(
-                request,
-                f"Please select a valid {field_name.replace('_', ' ').title()} for the order.",
-                extra_tags='custom-error'
-            )
+        except Exception as e:
+            logger.error(f"Error saving order {obj.id}: {str(e)}")
+            messages.error(request, f"Error saving order: {str(e)}")
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the order."""
-        return f"Order for {obj.user.email} (Total: {obj.calculate_total()})"
-    grok_side_view.short_description = "Grok Side View"
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('<int:order_id>/send-invoice-email/', self.admin_site.admin_view(self.send_invoice_email), name='send_invoice_email'),
+            path('<int:order_id>/send-delivery-note-email/', self.admin_site.admin_view(self.send_delivery_note_email), name='send_delivery_note_email'),
+            path('<int:order_id>/send-paid-receipt-email/', self.admin_site.admin_view(self.send_paid_receipt_email), name='send_paid_receipt_email'),
+            path('<int:order_id>/send-refunded-receipt-email/', self.admin_site.admin_view(self.send_refunded_receipt_email), name='send_refunded_receipt_email'),
+            path('<int:order_id>/regenerate-invoice/', self.admin_site.admin_view(self.regenerate_invoice), name='regenerate_invoice'),
+            path('<int:order_id>/regenerate-delivery-note/', self.admin_site.admin_view(self.regenerate_delivery_note), name='regenerate_delivery_note'),
+            path('<int:order_id>/regenerate-paid-receipt/', self.admin_site.admin_view(self.regenerate_paid_receipt), name='regenerate_paid_receipt'),
+            path('<int:order_id>/regenerate-refunded-receipt/', self.admin_site.admin_view(self.regenerate_refunded_receipt), name='regenerate_refunded_receipt'),
+        ]
+        return custom_urls + urls
 
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
+    def send_invoice_email(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order or not order.invoice:
+            self.message_user(request, "No invoice available to send.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            email = EmailMessage(
+                subject=f"Invoice for Order #{order.id}",
+                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the invoice for your order #{order.id}.\n\nThank you for your purchase!\n\nBest regards,\nPraco Packaging Supplies Ltd.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[order.user.email],
+            )
+            email.attach(f'invoice_order_{order.id}.pdf', order.invoice.read(), 'application/pdf')
+            email.send()
+            logger.info(f"Invoice email sent to {order.user.email} for order {order.id}")
+            self.message_user(request, f"Invoice email sent to {order.user.email}.")
+        except Exception as e:
+            logger.error(f"Error sending invoice email for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error sending invoice email: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def send_delivery_note_email(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order or not order.delivery_note:
+            self.message_user(request, "No delivery note available to send.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            email = EmailMessage(
+                subject=f"Delivery Note for Order #{order.id}",
+                body=f"Dear Team,\n\nPlease find attached the delivery note for order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=['siddiqui.faizmuhammad@gmail.com'],
+            )
+            email.attach(f'delivery_note_order_{order.id}.pdf', order.delivery_note.read(), 'application/pdf')
+            email.send()
+            logger.info(f"Delivery note email sent to siddiqui.faizmuhammad@gmail.com for order {order.id}")
+            self.message_user(request, "Delivery note email sent to siddiqui.faizmuhammad@gmail.com.")
+        except Exception as e:
+            logger.error(f"Error sending delivery note email for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error sending delivery note email: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def send_paid_receipt_email(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order or not order.paid_receipt:
+            self.message_user(request, "No paid receipt available to send.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            email = EmailMessage(
+                subject=f"Paid Receipt for Order #{order.id}",
+                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the paid receipt for your order #{order.id}.\n\nThank you for your payment!\n\nBest regards,\nPraco Packaging Supplies Ltd.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[order.user.email],
+            )
+            email.attach(f'paid_receipt_order_{order.id}.pdf', order.paid_receipt.read(), 'application/pdf')
+            email.send()
+            logger.info(f"Paid receipt email sent to {order.user.email} for order {order.id}")
+            self.message_user(request, f"Paid receipt email sent to {order.user.email}.")
+        except Exception as e:
+            logger.error(f"Error sending paid receipt email for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error sending paid receipt email: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def send_refunded_receipt_email(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order or not order.refunded_receipt:
+            self.message_user(request, "No refunded receipt available to send.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            email = EmailMessage(
+                subject=f"Refunded Receipt for Order #{order.id}",
+                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the refunded receipt for your order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[order.user.email],
+            )
+            email.attach(f'refunded_receipt_order_{order.id}.pdf', order.refunded_receipt.read(), 'application/pdf')
+            email.send()
+            logger.info(f"Refunded receipt email sent to {order.user.email} for order {order.id}")
+            self.message_user(request, f"Refunded receipt email sent to {order.user.email}.")
+        except Exception as e:
+            logger.error(f"Error sending refunded receipt email for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error sending refunded receipt email: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def regenerate_invoice(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order:
+            self.message_user(request, "Order not found.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            invoice_buffer = order.generate_invoice_pdf()
+            if invoice_buffer:
+                if order.invoice:
+                    order.invoice.delete(save=False)
+                order.invoice.save(
+                    f'invoice_order_{order.id}.pdf',
+                    ContentFile(invoice_buffer.getvalue()),
+                    save=True
+                )
+                invoice_buffer.close()
+                logger.info(f"Invoice regenerated for order {order.id}")
+                self.message_user(request, "Invoice regenerated successfully.")
+            else:
+                logger.warning(f"Invoice regeneration failed for order {order.id}")
+                self.message_user(request, "Failed to regenerate invoice.", level=messages.ERROR)
+        except Exception as e:
+            logger.error(f"Error regenerating invoice for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error regenerating invoice: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def regenerate_delivery_note(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order:
+            self.message_user(request, "Order not found.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            delivery_note_buffer = order.generate_delivery_note_pdf()
+            if delivery_note_buffer:
+                if order.delivery_note:
+                    order.delivery_note.delete(save=False)
+                order.delivery_note.save(
+                    f'delivery_note_order_{order.id}.pdf',
+                    ContentFile(delivery_note_buffer.getvalue()),
+                    save=True
+                )
+                delivery_note_buffer.close()
+                logger.info(f"Delivery note regenerated for order {order.id}")
+                self.message_user(request, "Delivery note regenerated successfully.")
+            else:
+                logger.warning(f"Delivery note regeneration failed for order {order.id}")
+                self.message_user(request, "Failed to regenerate delivery note.", level=messages.ERROR)
+        except Exception as e:
+            logger.error(f"Error regenerating delivery note for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error regenerating delivery note: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def regenerate_paid_receipt(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order:
+            self.message_user(request, "Order not found.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            paid_receipt_buffer = order.generate_paid_receipt_pdf()
+            if paid_receipt_buffer:
+                if order.paid_receipt:
+                    order.paid_receipt.delete(save=False)
+                order.paid_receipt.save(
+                    f'paid_receipt_order_{order.id}.pdf',
+                    ContentFile(paid_receipt_buffer.getvalue()),
+                    save=True
+                )
+                paid_receipt_buffer.close()
+                logger.info(f"Paid receipt regenerated for order {order.id}")
+                self.message_user(request, "Paid receipt regenerated successfully.")
+            else:
+                logger.warning(f"Paid receipt regeneration failed for order {order.id}")
+                self.message_user(request, "Failed to regenerate paid receipt.", level=messages.ERROR)
+        except Exception as e:
+            logger.error(f"Error regenerating paid receipt for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error regenerating paid receipt: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def regenerate_refunded_receipt(self, request, order_id):
+        order = self.get_object(request, order_id)
+        if not order:
+            self.message_user(request, "Order not found.", level=messages.ERROR)
+            return self.redirect_to_changelist()
+
+        try:
+            refunded_receipt_buffer = order.generate_refunded_receipt_pdf()
+            if refunded_receipt_buffer:
+                if order.refunded_receipt:
+                    order.refunded_receipt.delete(save=False)
+                order.refunded_receipt.save(
+                    f'refunded_receipt_order_{order.id}.pdf',
+                    ContentFile(refunded_receipt_buffer.getvalue()),
+                    save=True
+                )
+                refunded_receipt_buffer.close()
+                logger.info(f"Refunded receipt regenerated for order {order.id}")
+                self.message_user(request, "Refunded receipt regenerated successfully.")
+            else:
+                logger.warning(f"Refunded receipt regeneration failed for order {order.id}")
+                self.message_user(request, "Failed to regenerate refunded receipt.", level=messages.ERROR)
+        except Exception as e:
+            logger.error(f"Error regenerating refunded receipt for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error regenerating refunded receipt: {str(e)}", level=messages.ERROR)
+        return self.redirect_to_changelist()
+
+    def redirect_to_changelist(self):
+        return HttpResponseRedirect(reverse('admin:ecommerce_order_changelist'))
 
 class OrderItemAdmin(admin.ModelAdmin):
     list_display = (
-        'order', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type',
+        'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type',
         'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total',
         'get_weight', 'user_exclusive_price', 'created_at', 'updated_at',
         'grok_side_view'
@@ -1039,43 +1384,60 @@ class OrderItemAdmin(admin.ModelAdmin):
     )
 
     def get_price_per_unit(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        return pricing_data.price if pricing_data else Decimal('0.00')
-    get_price_per_unit.short_description = "Price Per Unit"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            return pricing_data.price if pricing_data else Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_price_per_pack(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
-        return Decimal('0.00')
-    get_price_per_pack.short_description = "Price Per Pack"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            if pricing_data and obj.item.product_variant:
+                return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+            return Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_subtotal(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
-            per_pack_price = pricing_data.price * Decimal(units_per_pack)
-            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        return Decimal('0.00')
-    get_subtotal.short_description = "Subtotal"
+        try:
+            pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+            if pricing_data and obj.item.product_variant:
+                units_per_pack = obj.item.product_variant.units_per_pack
+                per_pack_price = pricing_data.price * Decimal(units_per_pack)
+                return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return Decimal('0.00')
+        except Exception as e:
+            # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_total(self, obj):
-        subtotal = self.get_subtotal(obj)
-        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_total.short_description = "Total"
+        try:
+            subtotal = self.get_subtotal(obj)
+            discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+            discount = discount_percentage / Decimal('100.00')
+            return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except Exception as e:
+            # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def get_weight(self, obj):
-        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
-        total_units = obj.total_units
-        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_weight.short_description = "Weight"
+        try:
+            item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+            total_units = obj.total_units
+            return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except Exception as e:
+            # logger.error(f"Error getting weight for order item {obj.id}: {str(e)}")
+            return Decimal('0.00')
 
     def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the order item."""
-        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
-    grok_side_view.short_description = "Grok Side View"
+        try:
+            return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
+        except Exception as e:
+            logger.error(f"Error generating grok side view for order item {obj.id}: {str(e)}")
+            return "Error generating order item summary"
 
     class Media:
         css = {

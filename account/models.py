@@ -2,9 +2,9 @@ from django.db import models
 from django.contrib.auth.models import BaseUserManager, AbstractBaseUser
 
 class UserManager(BaseUserManager):
-    def create_user(self, email, first_name, last_name, company_name=None, password=None):
+    def create_user(self, email, first_name, last_name, company_name=None, receive_marketing=False, password=None):
         """
-        Creates and saves a User with the given email, first name, last name, company name, and password.
+        Creates and saves a User with the given email, first name, last name, company name, marketing preference, and password.
         """
         if not email:
             raise ValueError('Users must have an email address')
@@ -15,21 +15,23 @@ class UserManager(BaseUserManager):
             email=self.normalize_email(email),
             first_name=first_name,
             last_name=last_name,
-            company_name=company_name
+            company_name=company_name,
+            receive_marketing=receive_marketing
         )
         user.set_password(password)
         user.save(using=self._db)
         return user
 
-    def create_superuser(self, email, first_name, last_name, password=None, company_name=None):
+    def create_superuser(self, email, first_name, last_name, password=None, company_name=None, receive_marketing=False):
         """
-        Creates and saves a superuser with the given email, first name, last name, company name, and password.
+        Creates and saves a superuser with the given email, first name, last name, company name, marketing preference, and password.
         """
         user = self.create_user(
             email=email,
             first_name=first_name,
             last_name=last_name,
             company_name=company_name,
+            receive_marketing=receive_marketing,
             password=password
         )
         user.is_admin = True
@@ -46,6 +48,7 @@ class User(AbstractBaseUser):
     first_name = models.CharField(max_length=255)
     last_name = models.CharField(max_length=255)
     company_name = models.CharField(max_length=255, blank=True, null=True)
+    receive_marketing = models.BooleanField(default=False, verbose_name='Receive Marketing Communications')
     is_active = models.BooleanField(default=True)
     is_admin = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
