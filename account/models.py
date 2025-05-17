@@ -69,6 +69,10 @@ class User(AbstractBaseUser):
     def has_module_perms(self, app_label):
         """Does the user have permissions to view the app `app_label`?"""
         return self.is_admin
+    
+    def get_full_name(self):
+        """Return the user's full name by concatenating first_name and last_name."""
+        return f"{self.first_name} {self.last_name}".strip()
 
     @property
     def is_staff(self):

@@ -13,7 +13,7 @@ from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.core.files.base import ContentFile
 from django.urls import reverse, path
-
+from django.utils.html import format_html
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at', 'grok_side_view')
@@ -114,17 +114,43 @@ class ProductAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
+
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 1
-    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
-    readonly_fields = ('created_at',)
-    autocomplete_fields = ['product_variant']
+    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'edit_link')
+    readonly_fields = ('created_at', 'edit_link')
 
     def get_formset(self, request, obj=None, **kwargs):
-        if obj is None or not obj.pk:
-            kwargs['form'] = forms.ModelForm
-        return super().get_formset(request, obj, **kwargs)
+        formset = super().get_formset(request, obj, **kwargs)
+        class InlineForm(formset.form):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                if self.instance.pk:
+                    for field_name in ['tier_type', 'range_start', 'range_end', 'no_end_range']:
+                        self.fields[field_name].disabled = True
+        formset.form = InlineForm
+        return formset
+
+    def edit_link(self, obj):
+        if obj.pk:
+            url = reverse('admin:%s_%s_change' % (obj._meta.app_label, obj._meta.model_name), args=[obj.pk])
+            # Format the range display: "20+" for no_end_range, "1-20" otherwise
+            range_str = f"{obj.range_start}+" if obj.no_end_range else f"{obj.range_start}-{obj.range_end}"
+            return format_html(
+                '<a class="btn btn-primary btn-sm" href="{}" target="_blank" onclick="window.open(\'{}\', \'_blank\', \'width=800,height=600\'); return false;">Edit {}</a>',
+                url, url, range_str
+            )
+        return format_html('<span>-</span>')
+    edit_link.short_description = "Edit Tier"
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        field = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == 'range_start':
+            field.help_text = "Must be a positive number. First tier must start from 1."
+        elif db_field.name == 'range_end':
+            field.help_text = "Must be greater than range start unless 'No End Range' is checked."
+        return field
 
     class Media:
         css = {
@@ -147,7 +173,7 @@ class PricingTierAdmin(admin.ModelAdmin):
         ('Range Details', {
             'fields': ('range_start', 'range_end', 'no_end_range'),
             'classes': ('inline-group',),
-            'description': 'Specify the quantity range for this tier.'
+            'description': 'Specify the quantity range for this tier. First tier must start from 1, and ranges must be sequential.'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -158,16 +184,18 @@ class PricingTierAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         try:
+            obj.full_clean()
             obj.save()
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+            return
 
     def grok_side_view(self, obj):
         """Grok Side View: Quick summary of the pricing tier."""
-        range_str = f"{obj.range_start}-{'+' if obj.no_end_range else obj.range_end}"
+        # Format the range display: "20+" for no_end_range, "1-20" otherwise
+        range_str = f"{obj.range_start}+" if obj.no_end_range else f"{obj.range_start}-{obj.range_end}"
         return f"{obj.tier_type.capitalize()} Tier: {range_str}"
     grok_side_view.short_description = "Grok Side View"
 
@@ -227,12 +255,13 @@ class TableFieldInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
+
 class ProductVariantAdmin(admin.ModelAdmin):
     list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at', 'grok_side_view')
     search_fields = ('name', 'product__name')
     list_filter = ('status', 'show_units_per', 'created_at')
     ordering = ('product', 'name')
-    inlines = [PricingTierInline, TableFieldInline]
+    inlines = [PricingTierInline]
     form = ProductVariantForm
     autocomplete_fields = ['product']
     readonly_fields = ('status', 'created_at')
@@ -257,25 +286,118 @@ class ProductVariantAdmin(admin.ModelAdmin):
     def get_inlines(self, request, obj):
         if obj is None or not obj.pk:
             return []
-        return [PricingTierInline, TableFieldInline]
+        return [PricingTierInline]
 
     def save_model(self, request, obj, form, change):
         try:
+            obj.full_clean()
             obj.save()
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+            return
 
     def save_related(self, request, form, formsets, change):
         try:
             super().save_related(request, form, formsets, change)
+            obj = form.instance
+            if obj.pk:  # Only validate if the object exists
+                pricing_tiers = obj.pricing_tiers.all()
+                pack_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pack'], key=lambda x: x.range_start)
+                pallet_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pallet'], key=lambda x: x.range_start)
+
+                if obj.show_units_per == 'pack':
+                    if not pack_tiers:
+                        messages.error(request, "At least one 'pack' pricing tier is required when show_units_per is 'Pack'.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    if pallet_tiers:
+                        messages.error(request, "Pallet pricing tiers are not allowed when show_units_per is 'Pack'.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    if pack_tiers and pack_tiers[0].range_start != 1:
+                        messages.error(request, "The first 'pack' pricing tier must start from 1.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    for i in range(len(pack_tiers) - 1):
+                        current = pack_tiers[i]
+                        next_tier = pack_tiers[i + 1]
+                        if current.no_end_range:
+                            if i != len(pack_tiers) - 2:  # Ensure no_end_range is only on the last tier
+                                messages.error(request, "A tier with 'No End Range' checked must be the last tier.")
+                                obj.status = 'draft'
+                                obj.save()
+                                return
+                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                            messages.error(request, f"Pack pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
+                            obj.status = 'draft'
+                            obj.save()
+                            return
+                elif obj.show_units_per == 'both':
+                    if not pack_tiers:
+                        messages.error(request, "At least one 'pack' pricing tier is required when show_units_per is 'Both'.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    if not pallet_tiers:
+                        messages.error(request, "At least one 'pallet' pricing tier is required when show_units_per is 'Both'.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    if pack_tiers and pack_tiers[0].range_start != 1:
+                        messages.error(request, "The first 'pack' pricing tier must start from 1.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    if pallet_tiers and pallet_tiers[0].range_start != 1:
+                        messages.error(request, "The first 'pallet' pricing tier must start from 1.")
+                        obj.status = 'draft'
+                        obj.save()
+                        return
+                    for i in range(len(pack_tiers) - 1):
+                        current = pack_tiers[i]
+                        next_tier = pack_tiers[i + 1]
+                        if current.no_end_range:
+                            if i != len(pack_tiers) - 2:
+                                messages.error(request, "A tier with 'No End Range' checked must be the last tier for pack.")
+                                obj.status = 'draft'
+                                obj.save()
+                                return
+                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                            messages.error(request, f"Pack pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
+                            obj.status = 'draft'
+                            obj.save()
+                            return
+                    for i in range(len(pallet_tiers) - 1):
+                        current = pallet_tiers[i]
+                        next_tier = pallet_tiers[i + 1]
+                        if current.no_end_range:
+                            if i != len(pallet_tiers) - 2:
+                                messages.error(request, "A tier with 'No End Range' checked must be the last tier for pallet.")
+                                obj.status = 'draft'
+                                obj.save()
+                                return
+                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                            messages.error(request, f"Pallet pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
+                            obj.status = 'draft'
+                            obj.save()
+                            return
+                else:
+                    messages.error(request, f"Invalid show_units_per value: {obj.show_units_per}")
+                    obj.status = 'draft'
+                    obj.save()
+                    return
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+            obj.status = 'draft'
+            obj.save()
+            return
 
     def grok_side_view(self, obj):
         """Grok Side View: Quick summary of the product variant."""
@@ -638,9 +760,13 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 1
-    fields = ('item', 'pricing_tier', 'pack_quantity', 'user_exclusive_price', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
-    readonly_fields = ('created_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    fields = ('item', 'pricing_tier', 'pack_quantity', 'user_exclusive_price', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    readonly_fields = ('created_at', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
     autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
+
+    def get_discount_percentage(self, obj):
+        return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+    get_discount_percentage.short_description = "Discount Percentage"
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
@@ -683,9 +809,9 @@ class CartItemInline(admin.TabularInline):
 
 class CartItemAdmin(admin.ModelAdmin):
     search_fields = ('cart__user__email', 'item__sku')
-    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
+    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
     list_filter = ('created_at', 'updated_at')
-    readonly_fields = ('created_at', 'updated_at', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    readonly_fields = ('created_at', 'updated_at', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
     ordering = ('cart', 'item')
     autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
 
@@ -695,9 +821,9 @@ class CartItemAdmin(admin.ModelAdmin):
             'description': 'Core cart item details.'
         }),
         ('Pricing Details', {
-            'fields': ('get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
+            'fields': ('get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
             'classes': ('inline-group',),
-            'description': 'Pricing, weight, and discount information. Note: Pricing and weight fields are automatically calculated and read-only.'
+            'description': 'Pricing, weight, discount information, and discount percentage. Note: Calculated fields are automatically computed and read-only.'
         }),
         ('Metadata', {
             'fields': ('created_at', 'updated_at'),
@@ -705,6 +831,10 @@ class CartItemAdmin(admin.ModelAdmin):
             'description': 'Timestamps and other metadata.'
         }),
     )
+
+    def get_discount_percentage(self, obj):
+        return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+    get_discount_percentage.short_description = "Discount Percentage"
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
@@ -771,7 +901,7 @@ class CartItemAdmin(admin.ModelAdmin):
 
     def grok_side_view(self, obj):
         """Grok Side View: Quick summary of the cart item."""
-        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
+        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)}, Discount: {self.get_discount_percentage(obj)}%)"
     grok_side_view.short_description = "Grok Side View"
 
     class Media:
@@ -921,11 +1051,11 @@ class OrderAdminForm(forms.ModelForm):
         fields = [
             'user', 'shipping_address', 'billing_address', 'status',
             'payment_status', 'payment_verified', 'transaction_id',
-            'payment_receipt', 'refunded_transaction_id', 'refunded_payment_receipt',
+            'payment_receipt', 'refund_transaction_id', 'refund_payment_receipt',
             'vat', 'discount'
         ]  # Include only editable fields
         exclude = [
-            'paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note',
+            'paid_receipt', 'refund_receipt', 'invoice', 'delivery_note',
             'payment_method', 'shipping_cost', 'created_at', 'updated_at'
         ]  # Explicitly exclude non-editable fields
 
@@ -952,7 +1082,7 @@ class OrderAdminForm(forms.ModelForm):
             'pending': 'PENDING',
             'completed': 'COMPLETED',
             'failed': 'FAILED',
-            'refunded': 'REFUNDED'
+            'refund': 'refund'
         }
         normalized = payment_status.upper() if payment_status else payment_status
         if normalized in payment_status_map:
@@ -961,31 +1091,32 @@ class OrderAdminForm(forms.ModelForm):
             raise ValidationError(f'"{payment_status}" is not a valid choice.')
         return normalized
 
+
 class OrderAdmin(admin.ModelAdmin):
     form = OrderAdminForm
     list_display = (
         'user', 'status', 'payment_status', 'payment_method',
         'get_subtotal', 'vat', 'discount', 'shipping_cost', 'get_total',
         'get_total_units', 'get_total_packs', 'get_total_weight',
-        'transaction_id', 'refunded_transaction_id',
+        'transaction_id', 'refund_transaction_id',
         'created_at', 'updated_at', 'grok_side_view',
         'invoice_actions', 'delivery_note_actions',
-        'paid_receipt_actions', 'refunded_receipt_actions'
+        'paid_receipt_actions', 'refund_receipt_actions'
     )
     search_fields = (
         'user__email', 'shipping_address__street', 'billing_address__street',
-        'transaction_id', 'refunded_transaction_id'
+        'transaction_id', 'refund_transaction_id'
     )
     list_filter = ('status', 'payment_status', 'payment_method', 'created_at', 'updated_at')
     ordering = ('-created_at',)
     inlines = [OrderItemInline]
     readonly_fields = (
         'payment_method', 'shipping_cost', 'invoice', 'delivery_note',
-        'paid_receipt', 'refunded_receipt', 'created_at', 'updated_at',
+        'paid_receipt', 'refund_receipt', 'created_at', 'updated_at',
         'get_subtotal', 'get_total', 'get_total_units', 'get_total_packs',
         'get_total_weight'
     )
-
+    
     fieldsets = (
         ('Basic Information', {
             'fields': (
@@ -1005,13 +1136,18 @@ class OrderAdmin(admin.ModelAdmin):
         ('Payment Information', {
             'fields': (
                 'payment_verified', 'transaction_id', 'payment_receipt',
-                'refunded_transaction_id', 'refunded_payment_receipt'
+                'refund_transaction_id', 'refund_payment_receipt'
             ),
             'classes': ('inline-group',),
             'description': 'Payment and refund details.'
         }),
         ('Documents', {
-            'fields': ('invoice', 'delivery_note', 'paid_receipt', 'refunded_receipt'),
+            'fields': (
+                'invoice', 'invoice_actions',
+                'delivery_note', 'delivery_note_actions',
+                'paid_receipt', 'paid_receipt_actions',
+                'refund_receipt', 'refund_receipt_actions'
+            ),
             'classes': ('inline-group',),
             'description': 'Generated documents for the order (read-only).'
         }),
@@ -1023,10 +1159,9 @@ class OrderAdmin(admin.ModelAdmin):
     )
 
     def get_readonly_fields(self, request, obj=None):
-        """Dynamically determine read-only fields."""
-        readonly = list(self.readonly_fields)
+        readonly = list(self.readonly_fields) + ['invoice_actions', 'delivery_note_actions', 'paid_receipt_actions', 'refund_receipt_actions']
         if obj:
-            readonly.extend(['paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note', 'payment_method', 'shipping_cost'])
+            readonly.extend(['paid_receipt', 'refund_receipt', 'invoice', 'delivery_note', 'payment_method', 'shipping_cost'])
         return readonly
 
     def get_subtotal(self, obj):
@@ -1074,6 +1209,8 @@ class OrderAdmin(admin.ModelAdmin):
             return "Error generating order summary"
 
     def invoice_actions(self, obj):
+        if not obj.id:
+            return admin.utils.format_html('<span>Save order to view actions</span>')
         invoice_url = obj.invoice.url if obj.invoice else "#"
         buttons = [
             f'<a href="{invoice_url}" target="_blank">View</a>',
@@ -1084,6 +1221,8 @@ class OrderAdmin(admin.ModelAdmin):
     invoice_actions.short_description = "Invoice Actions"
 
     def delivery_note_actions(self, obj):
+        if not obj.id:
+            return admin.utils.format_html('<span>Save order to view actions</span>')
         delivery_note_url = obj.delivery_note.url if obj.delivery_note else "#"
         buttons = [
             f'<a href="{delivery_note_url}" target="_blank">View</a>',
@@ -1094,6 +1233,8 @@ class OrderAdmin(admin.ModelAdmin):
     delivery_note_actions.short_description = "Delivery Note Actions"
 
     def paid_receipt_actions(self, obj):
+        if not obj.id:
+            return admin.utils.format_html('<span>Save order to view actions</span>')
         paid_receipt_url = obj.paid_receipt.url if obj.paid_receipt else "#"
         buttons = [
             f'<a href="{paid_receipt_url}" target="_blank">View</a>',
@@ -1103,24 +1244,27 @@ class OrderAdmin(admin.ModelAdmin):
         return admin.utils.format_html(" | ".join(buttons))
     paid_receipt_actions.short_description = "Paid Receipt Actions"
 
-    def refunded_receipt_actions(self, obj):
-        refunded_receipt_url = obj.refunded_receipt.url if obj.refunded_receipt else "#"
+    def refund_receipt_actions(self, obj):
+        if not obj.id:
+            return admin.utils.format_html('<span>Save order to view actions</span>')
+        refund_receipt_url = obj.refund_receipt.url if obj.refund_receipt else "#"
         buttons = [
-            f'<a href="{refunded_receipt_url}" target="_blank">View</a>',
-            f'<a href="{reverse("admin:send_refunded_receipt_email", args=[obj.id])}">Send Email</a>',
-            f'<a href="{reverse("admin:regenerate_refunded_receipt", args=[obj.id])}">Regenerate</a>',
+            f'<a href="{refund_receipt_url}" target="_blank">View</a>',
+            f'<a href="{reverse("admin:send_refund_receipt_email", args=[obj.id])}">Send Email</a>',
+            f'<a href="{reverse("admin:regenerate_refund_receipt", args=[obj.id])}">Regenerate</a>',
         ]
         return admin.utils.format_html(" | ".join(buttons))
-    refunded_receipt_actions.short_description = "Refunded Receipt Actions"
+    refund_receipt_actions.short_description = "refund Receipt Actions"
 
     def save_model(self, request, obj, form, change):
         try:
             obj.full_clean()
             super().save_model(request, obj, form, change)
             obj.calculate_total()
-            obj.generate_and_save_pdfs()
-            if obj.payment_verified or obj.payment_status in ['COMPLETED', 'REFUNDED']:
-                obj.generate_and_save_payment_receipts()
+            if obj.items.exists():
+                obj.generate_and_save_pdfs()
+                if obj.payment_verified or obj.payment_status in ['COMPLETED', 'refund']:
+                    obj.generate_and_save_payment_receipts()
             messages.success(request, "Order saved successfully.")
         except ValidationError as e:
             for field, errors in e.error_dict.items():
@@ -1138,11 +1282,11 @@ class OrderAdmin(admin.ModelAdmin):
             path('<int:order_id>/send-invoice-email/', self.admin_site.admin_view(self.send_invoice_email), name='send_invoice_email'),
             path('<int:order_id>/send-delivery-note-email/', self.admin_site.admin_view(self.send_delivery_note_email), name='send_delivery_note_email'),
             path('<int:order_id>/send-paid-receipt-email/', self.admin_site.admin_view(self.send_paid_receipt_email), name='send_paid_receipt_email'),
-            path('<int:order_id>/send-refunded-receipt-email/', self.admin_site.admin_view(self.send_refunded_receipt_email), name='send_refunded_receipt_email'),
+            path('<int:order_id>/send-refund-receipt-email/', self.admin_site.admin_view(self.send_refund_receipt_email), name='send_refund_receipt_email'),
             path('<int:order_id>/regenerate-invoice/', self.admin_site.admin_view(self.regenerate_invoice), name='regenerate_invoice'),
             path('<int:order_id>/regenerate-delivery-note/', self.admin_site.admin_view(self.regenerate_delivery_note), name='regenerate_delivery_note'),
             path('<int:order_id>/regenerate-paid-receipt/', self.admin_site.admin_view(self.regenerate_paid_receipt), name='regenerate_paid_receipt'),
-            path('<int:order_id>/regenerate-refunded-receipt/', self.admin_site.admin_view(self.regenerate_refunded_receipt), name='regenerate_refunded_receipt'),
+            path('<int:order_id>/regenerate-refund-receipt/', self.admin_site.admin_view(self.regenerate_refund_receipt), name='regenerate_refund_receipt'),
         ]
         return custom_urls + urls
 
@@ -1212,26 +1356,26 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(request, f"Error sending paid receipt email: {str(e)}", level=messages.ERROR)
         return self.redirect_to_changelist()
 
-    def send_refunded_receipt_email(self, request, order_id):
+    def send_refund_receipt_email(self, request, order_id):
         order = self.get_object(request, order_id)
-        if not order or not order.refunded_receipt:
-            self.message_user(request, "No refunded receipt available to send.", level=messages.ERROR)
+        if not order or not order.refund_receipt:
+            self.message_user(request, "No refund receipt available to send.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
         try:
             email = EmailMessage(
-                subject=f"Refunded Receipt for Order #{order.id}",
-                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the refunded receipt for your order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
+                subject=f"refund Receipt for Order #{order.id}",
+                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the refund receipt for your order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 to=[order.user.email],
             )
-            email.attach(f'refunded_receipt_order_{order.id}.pdf', order.refunded_receipt.read(), 'application/pdf')
+            email.attach(f'refund_receipt_order_{order.id}.pdf', order.refund_receipt.read(), 'application/pdf')
             email.send()
-            logger.info(f"Refunded receipt email sent to {order.user.email} for order {order.id}")
-            self.message_user(request, f"Refunded receipt email sent to {order.user.email}.")
+            logger.info(f"refund receipt email sent to {order.user.email} for order {order.id}")
+            self.message_user(request, f"refund receipt email sent to {order.user.email}.")
         except Exception as e:
-            logger.error(f"Error sending refunded receipt email for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error sending refunded receipt email: {str(e)}", level=messages.ERROR)
+            logger.error(f"Error sending refund receipt email for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error sending refund receipt email: {str(e)}", level=messages.ERROR)
         return self.redirect_to_changelist()
 
     def regenerate_invoice(self, request, order_id):
@@ -1314,34 +1458,34 @@ class OrderAdmin(admin.ModelAdmin):
             logger.error(f"Error regenerating paid receipt for order {order.id}: {str(e)}")
             self.message_user(request, f"Error regenerating paid receipt: {str(e)}", level=messages.ERROR)
         return self.redirect_to_changelist()
-
-    def regenerate_refunded_receipt(self, request, order_id):
+    
+    def regenerate_refund_receipt(self, request, order_id):
         order = self.get_object(request, order_id)
         if not order:
             self.message_user(request, "Order not found.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
         try:
-            refunded_receipt_buffer = order.generate_refunded_receipt_pdf()
-            if refunded_receipt_buffer:
-                if order.refunded_receipt:
-                    order.refunded_receipt.delete(save=False)
-                order.refunded_receipt.save(
-                    f'refunded_receipt_order_{order.id}.pdf',
-                    ContentFile(refunded_receipt_buffer.getvalue()),
+            refund_receipt_buffer = order.generate_refund_receipt_pdf()
+            if refund_receipt_buffer:
+                if order.refund_receipt:
+                    order.refund_receipt.delete(save=False)
+                order.refund_receipt.save(
+                    f'refund_receipt_order_{order.id}.pdf',
+                    ContentFile(refund_receipt_buffer.getvalue()),
                     save=True
                 )
-                refunded_receipt_buffer.close()
-                logger.info(f"Refunded receipt regenerated for order {order.id}")
-                self.message_user(request, "Refunded receipt regenerated successfully.")
+                refund_receipt_buffer.close()
+                logger.info(f"refund receipt regenerated for order {order.id}")
+                self.message_user(request, "refund receipt regenerated successfully.")
             else:
-                logger.warning(f"Refunded receipt regeneration failed for order {order.id}")
-                self.message_user(request, "Failed to regenerate refunded receipt.", level=messages.ERROR)
+                logger.warning(f"refund receipt regeneration failed for order {order.id}")
+                self.message_user(request, "Failed to regenerate refund receipt.", level=messages.ERROR)
         except Exception as e:
-            logger.error(f"Error regenerating refunded receipt for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error regenerating refunded receipt: {str(e)}", level=messages.ERROR)
+            logger.error(f"Error regenerating refund receipt for order {order.id}: {str(e)}")
+            self.message_user(request, f"Error regenerating refund receipt: {str(e)}", level=messages.ERROR)
         return self.redirect_to_changelist()
-
+    
     def redirect_to_changelist(self):
         return HttpResponseRedirect(reverse('admin:ecommerce_order_changelist'))
 

@@ -48,23 +48,79 @@ class PricingTierSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         tier_type = data.get('tier_type')
-        no_end_range = data.get('no_end_range')
+        range_start = data.get('range_start')
         range_end = data.get('range_end')
+        no_end_range = data.get('no_end_range')
         product_variant = data.get('product_variant')
 
+        # Basic validations
         if no_end_range and range_end is not None:
             raise serializers.ValidationError("Range end must be null when 'No End Range' is checked.")
         if not no_end_range and range_end is None:
             raise serializers.ValidationError("Range end is required when 'No End Range' is not checked.")
         if not product_variant:
             raise serializers.ValidationError("Product variant is required.")
+        if range_start <= 0:
+            raise serializers.ValidationError("Range start must be a positive number.")
+        if not no_end_range and range_end <= range_start:
+            raise serializers.ValidationError("Range end must be greater than range start.")
 
+        # Validate tier_type against show_units_per
         if product_variant:
             show_units_per = product_variant.show_units_per
             if show_units_per == 'pack' and tier_type != 'pack':
                 raise serializers.ValidationError("Tier type must be 'pack' when show_units_per is 'Pack'.")
             if show_units_per == 'both' and tier_type not in ['pack', 'pallet']:
                 raise serializers.ValidationError("Tier type must be 'pack' or 'pallet' when show_units_per is 'Both'.")
+
+        # Validate mandatory starting range and sequential ranges
+        if product_variant:
+            instance = self.instance
+            existing_tiers = PricingTier.objects.filter(
+                product_variant=product_variant,
+                tier_type=tier_type
+            )
+            if instance:
+                existing_tiers = existing_tiers.exclude(id=instance.id)
+            existing_tiers = existing_tiers.order_by('range_start')
+
+            # Check if this is the first tier
+            if not existing_tiers and range_start != 1:
+                raise serializers.ValidationError(f"The first {tier_type} tier must start from 1.")
+
+            # Check for overlaps and gaps
+            current_end = float('inf') if no_end_range else range_end
+            for tier in existing_tiers:
+                tier_end = float('inf') if tier.no_end_range else tier.range_end
+                if range_start <= tier_end and current_end >= tier.range_start:
+                    raise serializers.ValidationError(
+                        f"Range {range_start}-{'+' if no_end_range else range_end} overlaps with "
+                        f"existing range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} for {tier_type}."
+                    )
+
+            # Check sequential ranges
+            if existing_tiers:
+                first_tier = existing_tiers.first()
+                if first_tier.range_start != 1:
+                    raise serializers.ValidationError(f"The first {tier_type} tier must start from 1.")
+                sorted_tiers = list(existing_tiers)
+                if not no_end_range and range_end:
+                    sorted_tiers.append(PricingTier(
+                        tier_type=tier_type,
+                        range_start=range_start,
+                        range_end=range_end,
+                        no_end_range=no_end_range
+                    ))
+                    sorted_tiers.sort(key=lambda x: x.range_start)
+                for i in range(len(sorted_tiers) - 1):
+                    current = sorted_tiers[i]
+                    next_tier = sorted_tiers[i + 1]
+                    current_end = float('inf') if current.no_end_range else current.range_end
+                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                        raise serializers.ValidationError(
+                            f"Range {range_start}-{'+' if no_end_range else range_end} creates a gap or is not sequential "
+                            f"with existing ranges for {tier_type}. Ensure ranges are sequential with no gaps."
+                        )
 
         return data
 
@@ -84,15 +140,17 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         units_per_pack = data.get('units_per_pack', 6)
         units_per_pallet = data.get('units_per_pallet', 0)
 
+        # Validate units configuration
         if show_units_per == 'both' and units_per_pallet <= units_per_pack:
             raise serializers.ValidationError("Units per pallet must be greater than units per pack when show_units_per is 'Both'.")
         if show_units_per == 'pack' and units_per_pallet != 0:
             raise serializers.ValidationError("Units per pallet must be 0 when show_units_per is 'Pack'.")
 
+        # Validate pricing tiers if instance exists
         if self.instance and self.instance.pk:
             pricing_tiers = self.instance.pricing_tiers.all()
-            pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
-            pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
+            pack_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pack'], key=lambda x: x.range_start)
+            pallet_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pallet'], key=lambda x: x.range_start)
 
             if show_units_per == 'pack':
                 if not pack_tiers:
@@ -102,6 +160,13 @@ class ProductVariantSerializer(serializers.ModelSerializer):
                 pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
                 if len(pack_no_end) != 1:
                     raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
+                if pack_tiers[0].range_start != 1:
+                    raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
+                for i in range(len(pack_tiers) - 1):
+                    current = pack_tiers[i]
+                    next_tier = pack_tiers[i + 1]
+                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                        raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps.")
             elif show_units_per == 'both':
                 if not pack_tiers:
                     raise serializers.ValidationError("At least one 'pack' pricing tier is required when show_units_per is 'Both'.")
@@ -113,6 +178,20 @@ class ProductVariantSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
                 if len(pallet_no_end) != 1:
                     raise serializers.ValidationError("Exactly one 'pallet' pricing tier must have 'No End Range' checked.")
+                if pack_tiers[0].range_start != 1:
+                    raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
+                if pallet_tiers[0].range_start != 1:
+                    raise serializers.ValidationError("The first 'pallet' pricing tier must start from 1.")
+                for i in range(len(pack_tiers) - 1):
+                    current = pack_tiers[i]
+                    next_tier = pack_tiers[i + 1]
+                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                        raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps.")
+                for i in range(len(pallet_tiers) - 1):
+                    current = pallet_tiers[i]
+                    next_tier = pallet_tiers[i + 1]
+                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                        raise serializers.ValidationError("Pallet pricing tiers must be sequential with no gaps.")
 
         return data
 
@@ -363,6 +442,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+
 class CartItemDetailSerializer(serializers.ModelSerializer):
     item = ItemSerializer(read_only=True)  # Explicitly define the item field to use ItemSerializer
 
@@ -370,6 +450,9 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
         model = CartItem
         fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
         # Removed depth=4 since we're explicitly defining nested serializers
+
+    def get_discount_percentage(self, obj):
+        return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
@@ -403,6 +486,7 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         representation = super().to_representation(instance)
         representation.update({
+            'discount_percentage': self.get_discount_percentage(instance),
             'price_per_unit': self.get_price_per_unit(instance),
             'price_per_pack': self.get_price_per_pack(instance),
             'subtotal': self.get_subtotal(instance),
@@ -651,20 +735,19 @@ class OrderSerializer(serializers.ModelSerializer):
             'shipping_address_detail', 'billing_address_detail',
             'shipping_cost', 'vat', 'discount', 'status', 'payment_status',
             'payment_method', 'payment_verified', 'transaction_id',
-            'payment_receipt', 'refunded_transaction_id', 'refunded_payment_receipt',
-            'paid_receipt', 'refunded_receipt', 'invoice', 'delivery_note',
+            'payment_receipt', 'refund_transaction_id', 'refund_payment_receipt',
+            'paid_receipt', 'refund_receipt', 'invoice', 'delivery_note',
             'created_at', 'updated_at', 'items'
         ]
         read_only_fields = [
             'id', 'user', 'items', 'created_at', 'updated_at',
             'shipping_address_detail', 'billing_address_detail',
             'payment_method', 'shipping_cost', 'vat', 'discount',
-            'invoice', 'delivery_note', 'paid_receipt', 'refunded_receipt',
+            'invoice', 'delivery_note', 'paid_receipt', 'refund_receipt',
             'transaction_id', 'payment_receipt'
         ]
 
     def validate_status(self, value):
-        """Normalize status to match STATUS_CHOICES."""
         status_map = {
             'pending': 'PENDING',
             'processing': 'PROCESSING',
@@ -681,12 +764,11 @@ class OrderSerializer(serializers.ModelSerializer):
         return normalized
 
     def validate_payment_status(self, value):
-        """Normalize payment_status to match PAYMENT_STATUS_CHOICES."""
         payment_status_map = {
             'pending': 'PENDING',
             'completed': 'COMPLETED',
             'failed': 'FAILED',
-            'refunded': 'REFUNDED'
+            'refund': 'REFUND'
         }
         normalized = value.upper() if value else value
         if normalized in payment_status_map:
@@ -703,8 +785,8 @@ class OrderSerializer(serializers.ModelSerializer):
 
         errors = {}
         if payment_verified:
-            if payment_status != 'COMPLETED':
-                errors['payment_status'] = 'Payment status must be COMPLETED when payment is verified.'
+            if payment_status == 'PENDING' or payment_status == 'FAILED':
+                errors['payment_status'] = 'Payment status must be COMPLETED/REFUNDED when payment is verified.'
             if not data.get('transaction_id') and not (self.instance and self.instance.transaction_id):
                 errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
             if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
@@ -714,19 +796,18 @@ class OrderSerializer(serializers.ModelSerializer):
                 errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
             if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
-        elif payment_status == 'REFUNDED':
+        elif payment_status == 'REFUND':
             if not data.get('transaction_id') and not (self.instance and self.instance.transaction_id):
                 errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
             if not data.get('payment_receipt') and not (self.instance and self.instance.payment_receipt):
                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
-            if not data.get('refunded_transaction_id') and not (self.instance and self.instance.refunded_transaction_id):
-                errors['refunded_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
-            if not data.get('refunded_payment_receipt') and not (self.instance and self.instance.refunded_payment_receipt):
-                errors['refunded_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
-            if self.instance and not self.instance.paid_receipt:
-                errors['paid_receipt'] = 'Paid receipt must exist when payment status is Refunded.'
+            if not data.get('refund_transaction_id') and not (self.instance and self.instance.refund_transaction_id):
+                errors['refund_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
+            if not data.get('refund_payment_receipt') and not (self.instance and self.instance.refund_payment_receipt):
+                errors['refund_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
         if errors:
             raise serializers.ValidationError(errors)
+
         return data
 
     def create(self, validated_data):
@@ -777,7 +858,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
             order.calculate_total()
             order.generate_and_save_pdfs()
-            if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUNDED']:
+            if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUND']:
                 order.generate_and_save_payment_receipts()
             logger.info(f"PDFs and receipts generated for order {order.id}")
 
@@ -788,9 +869,10 @@ class OrderSerializer(serializers.ModelSerializer):
         with transaction.atomic():
             order = super().update(instance, validated_data)
             order.calculate_total()
-            order.generate_and_save_pdfs()
-            if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUNDED']:
-                order.generate_and_save_payment_receipts()
+            if order.items.exists():
+                order.generate_and_save_pdfs()
+                if order.payment_verified or order.payment_status in ['COMPLETED', 'REFUND']:
+                    order.generate_and_save_payment_receipts()
             logger.info(f"Order {order.id} updated with PDFs and receipts")
             return order
 
@@ -827,10 +909,10 @@ class OrderSerializer(serializers.ModelSerializer):
                 'payment_verified': False,
                 'transaction_id': None,
                 'payment_receipt': None,
-                'refunded_transaction_id': None,
-                'refunded_payment_receipt': None,
+                'refund_transaction_id': None,
+                'refund_payment_receipt': None,
                 'paid_receipt': None,
-                'refunded_receipt': None,
+                'refund_receipt': None,
                 'invoice': None,
                 'delivery_note': None,
                 'items': [],

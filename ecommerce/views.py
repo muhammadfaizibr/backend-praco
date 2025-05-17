@@ -4,6 +4,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from ecommerce.models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, ShippingAddress, BillingAddress
@@ -22,6 +23,11 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from backend_praco.renderers import CustomRenderer
 
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class CategoryViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = Category.objects.all()
@@ -29,20 +35,21 @@ class CategoryViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['name']
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        search_query = self.request.query_params.get('search', None)
-        slug = self.request.query_params.get('slug', None)
+        qs = super().get_queryset()
+        search_query = self.request.query_params.get('search')
+        slug = self.request.query_params.get('slug')
         if search_query:
-            queryset = queryset.filter(
+            qs = qs.filter(
                 Q(name__icontains=search_query) |
                 Q(slug__icontains=search_query) |
                 Q(description__icontains=search_query)
             )
         if slug:
-            queryset = queryset.filter(slug=slug)
-        return queryset
+            qs = qs.filter(slug=slug)
+        return qs
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -56,6 +63,7 @@ class ProductImageViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -69,6 +77,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['name', 'slug', 'is_new']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -76,7 +85,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        qs = super().get_queryset()
         category_slug = self.request.query_params.get('category')
         slug = self.request.query_params.get('slug')
         search_query = self.request.query_params.get('search')
@@ -84,12 +93,12 @@ class ProductViewSet(viewsets.ModelViewSet):
         if category_slug:
             try:
                 category = Category.objects.get(slug=category_slug)
-                queryset = queryset.filter(category=category)
+                qs = qs.filter(category=category)
             except Category.DoesNotExist:
-                queryset = queryset.none()
+                qs = qs.none()
 
         if slug:
-            queryset = queryset.filter(slug=slug)
+            qs = qs.filter(slug=slug)
 
         if search_query:
             search_query = search_query.strip()
@@ -108,7 +117,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                     stop_sel='</b>',
                     config='english'
                 )
-                queryset = queryset.annotate(
+                qs = qs.annotate(
                     search=search_vector,
                     rank=search_rank,
                     headline=search_headline
@@ -118,7 +127,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                     Q(name__icontains=raw_query) | Q(description__icontains=raw_query)
                 ).order_by('-rank')
 
-        return queryset
+        return qs
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -137,6 +146,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product', 'name']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -145,16 +155,16 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='calculate-price')
     def calculate_price(self, request, pk=None):
-        product_variant = self.get_object()
+        pv = self.get_object()
         units = int(request.query_params.get('units', 0))
-        price_per = request.query_params.get('price_per', 'pack')  # 'pack' or 'pallet'
+        price_per = request.query_params.get('price_per', 'pack')
 
         if units <= 0:
             return Response({"error": "Units must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
 
-        units_per_pack = product_variant.units_per_pack
-        units_per_pallet = product_variant.units_per_pallet
-        show_units_per = product_variant.show_units_per
+        units_per_pack = pv.units_per_pack
+        units_per_pallet = pv.units_per_pallet
+        show_units_per = pv.show_units_per
 
         packs = 0
         pallets = 0
@@ -170,7 +180,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 pallets += 1
 
         try:
-            item = product_variant.items.first()
+            item = pv.items.first()
             if not item:
                 return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
         except Item.DoesNotExist:
@@ -178,7 +188,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
 
         total = Decimal('0.00')
         if show_units_per in ['pack', 'both'] and price_per == 'pack':
-            tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
+            tiers = pv.pricing_tiers.filter(tier_type='pack').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
@@ -192,7 +202,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         elif show_units_per in ['pallet', 'both'] and price_per == 'pallet':
-            tiers = product_variant.pricing_tiers.filter(tier_type='pallet').order_by('range_start')
+            tiers = pv.pricing_tiers.filter(tier_type='pallet').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
@@ -206,7 +216,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            tiers = product_variant.pricing_tiers.filter(tier_type='pack').order_by('range_start')
+            tiers = pv.pricing_tiers.filter(tier_type='pack').order_by('range_start')
             applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
@@ -235,6 +245,7 @@ class PricingTierViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'tier_type']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -248,6 +259,7 @@ class PricingTierDataViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item', 'pricing_tier']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -261,6 +273,7 @@ class TableFieldViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'field_type']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -274,6 +287,7 @@ class ItemImageViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -287,6 +301,7 @@ class ItemViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product_variant', 'sku', 'status']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -294,7 +309,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         return [AllowAny()]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        qs = super().get_queryset()
         width = self.request.query_params.get('width')
         length = self.request.query_params.get('length')
         height = self.request.query_params.get('height')
@@ -305,15 +320,15 @@ class ItemViewSet(viewsets.ModelViewSet):
 
         valid_units = ['MM', 'CM', 'IN', 'M']
         if measurement_unit and measurement_unit not in valid_units:
-            return queryset.none()
+            return qs.none()
 
         if category:
             category = category.lower()
             valid_categories = ['box', 'boxes', 'bag', 'bags', 'postal', 'postals']
             if category in valid_categories:
-                queryset = queryset.filter(product_variant__product__category__name__iexact=category)
+                qs = qs.filter(product_variant__product__category__name__iexact=category)
             else:
-                return queryset.none()
+                return qs.none()
 
         if width and length and height:
             try:
@@ -321,7 +336,7 @@ class ItemViewSet(viewsets.ModelViewSet):
                 length = Decimal(length)
                 height = Decimal(height)
             except (ValueError, TypeError):
-                return queryset.none()
+                return qs.none()
 
             to_inches = {
                 'MM': Decimal('0.0393701'),
@@ -337,7 +352,7 @@ class ItemViewSet(viewsets.ModelViewSet):
             }
 
             dimension_filter = Q()
-            for item in queryset:
+            for item in qs:
                 item_width = item.width
                 item_length = item.length
                 item_height = item.height
@@ -383,9 +398,9 @@ class ItemViewSet(viewsets.ModelViewSet):
                         height__gte=height - tolerance, height__lte=height + tolerance
                     )
 
-            queryset = queryset.filter(dimension_filter)
+            qs = qs.filter(dimension_filter)
 
-        return queryset
+        return qs
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -399,6 +414,7 @@ class ItemDataViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['item', 'field', 'field__field_type']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -412,6 +428,7 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['user', 'item']
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -423,11 +440,9 @@ class CartViewSet(viewsets.ModelViewSet):
     queryset = Cart.objects.all()
     serializer_class = CartSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def list(self, request, *args, **kwargs):
-        """
-        Retrieve the authenticated user's cart.
-        """
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access cart.")
         try:
@@ -438,18 +453,12 @@ class CartViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def get_queryset(self):
-        """
-        Return the cart for the authenticated user.
-        """
         if not self.request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access cart.")
         return self.queryset.filter(user=self.request.user)
 
     @action(detail=False, methods=['delete'], url_path='clear')
     def clear_cart(self, request):
-        """
-        Clear all items from the user's cart.
-        """
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to clear cart.")
         try:
@@ -463,6 +472,7 @@ class CartItemViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = CartItem.objects.all()
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def get_serializer_class(self):
         if self.action in ['list', 'retrieve']:
@@ -546,19 +556,12 @@ class CartItemViewSet(viewsets.ModelViewSet):
         try:
             instance = self.get_queryset().get(pk=pk)
         except CartItem.DoesNotExist:
-            return Response(
-                {"detail": "Cart item not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"detail": "Cart item not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if instance.item is None:
             instance.delete()
-            return Response(
-                {"detail": "Cart item has no associated item and has been deleted."},
-                status=status.HTTP_410_GONE
-            )
+            return Response({"detail": "Cart item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
 
-        # Ignore 'item' field in request data to prevent updates to it
         request_data = request.data.copy()
         if 'item' in request_data:
             del request_data['item']
@@ -584,17 +587,11 @@ class CartItemViewSet(viewsets.ModelViewSet):
         try:
             instance = self.get_object()
         except CartItem.DoesNotExist:
-            return Response(
-                {"detail": "Cart item not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"detail": "Cart item not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if instance.item is None:
             instance.delete()
-            return Response(
-                {"detail": "Cart item has no associated item and has been deleted."},
-                status=status.HTTP_410_GONE
-            )
+            return Response({"detail": "Cart item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
 
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -604,54 +601,46 @@ class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def list(self, request, *args, **kwargs):
-        """Retrieve the authenticated user's orders."""
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access orders.")
         try:
             queryset = self.get_queryset()
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
             serializer = self.get_serializer(queryset, many=True)
             return Response(serializer.data)
         except ValidationError as e:
-            print(f"Validation error in list: {str(e)}")
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            print(f"Unexpected error in list: {str(e)}")
+            print(e)
             return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get_queryset(self):
-        """Return orders for the authenticated user."""
         if not self.request.user.is_authenticated:
             raise PermissionDenied("Authentication required to access orders.")
-        return self.queryset.filter(user=self.request.user)
+        return self.queryset.filter(user=self.request.user).order_by('-created_at')
 
     def create(self, request, *args, **kwargs):
-        """Create a new order for the authenticated user."""
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to create an order.")
-        print(f"Creating order with payload: {request.data}")
-        # try:
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        print(f"Order created successfully: {serializer.data}")
         return Response(serializer.data, status=status.HTTP_201_CREATED)
-        # except ValidationError as e:
-            # print(f"Validation error in create: {e.detail}")
-            # return Response({"errors": e.detail}, status=status.HTTP_400_BAD_REQUEST)
-        # except Exception as e:
-            # print(f"Unexpected error in create: {str(e)}")
-            # return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def perform_create(self, serializer):
-        """Ensure the order is created with the authenticated user."""
         serializer.save(user=self.request.user)
 
 class OrderItemViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = OrderItem.objects.all()
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def get_serializer_class(self):
         if self.action in ['list', 'retrieve']:
@@ -740,17 +729,11 @@ class OrderItemViewSet(viewsets.ModelViewSet):
         try:
             instance = self.get_queryset().get(pk=pk)
         except OrderItem.DoesNotExist:
-            return Response(
-                {"detail": "Order item not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"detail": "Order item not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if instance.item is None:
             instance.delete()
-            return Response(
-                {"detail": "Order item has no associated item and has been deleted."},
-                status=status.HTTP_410_GONE
-            )
+            return Response({"detail": "Order item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
 
         request_data = request.data.copy()
         if 'item' in request_data:
@@ -777,24 +760,19 @@ class OrderItemViewSet(viewsets.ModelViewSet):
         try:
             instance = self.get_object()
         except OrderItem.DoesNotExist:
-            return Response(
-                {"detail": "Order item not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({"detail": "Order item not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if instance.item is None:
             instance.delete()
-            return Response(
-                {"detail": "Order item has no associated item and has been deleted."},
-                status=status.HTTP_410_GONE
-            )
+            return Response({"detail": "Order item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
 
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
-
 class AddressViewSet(viewsets.ModelViewSet):
+    renderer_classes = [CustomRenderer]
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         model = self.serializer_class.Meta.model
@@ -804,9 +782,13 @@ class AddressViewSet(viewsets.ModelViewSet):
         serializer.save(user=self.request.user)
 
 class ShippingAddressViewSet(AddressViewSet):
+    renderer_classes = [CustomRenderer]
     serializer_class = ShippingAddressSerializer
     queryset = ShippingAddress.objects.all()
+    pagination_class = StandardResultsSetPagination
 
 class BillingAddressViewSet(AddressViewSet):
+    renderer_classes = [CustomRenderer]
     serializer_class = BillingAddressSerializer
     queryset = BillingAddress.objects.all()
+    pagination_class = StandardResultsSetPagination
