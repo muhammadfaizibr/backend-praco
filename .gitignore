@@ -1,27 +1,78 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 
+# C extensions
+*.so
 
-*.py[cod] pycache/ *.pyc *.pyo *.pyd .Python env/ venv/ ENV/ env.bak/ venv.bak/
+# Virtual environment
+.env/
+venv/
+ENV/
+env/
+.venv/
+.Python
 
+# pipenv
+Pipfile.lock
 
+# Poetry
+poetry.lock
 
-*.log *.pot *.pyc pycache/ local_settings.py db.sqlite3 db.sqlite3-journal media/ migrations/
+# Django static and media files
+/static/
+media/
 
+# Django migration files
+**/migrations/
+!**/migrations/__init__.py
 
+# SQLite database
+*.sqlite3
 
-.idea/ .vscode/ *.sublime-project *.sublime-workspace
+# Secrets
+*.env
+.env.*
 
-OS generated files
+# VSCode settings
+.vscode/
 
-.DS_Store Thumbs.db
+# PyCharm settings
+.idea/
 
+# mypy
+.mypy_cache/
 
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
 
-.coverage coverage.xml *.cover *.py,cover .tox/ .nox/ .pytest_cache/
+# Test output
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
 
+# Sphinx documentation
+docs/_build/
 
+# PyInstaller
+*.manifest
+*.spec
 
-build/ dist/ *.egg *.egg-info/ .installed.cfg pip-log.txt pip-delete-this-directory.txt
+# Unit test / coverage reports
+.pytest_cache/
+.tox/
+.cache/
+*.log
 
+# Local dev tools
+*.DS_Store
+Thumbs.db
 
-
-*.swp *~ .profile .bash_history .cache .hypothesis/ .dmypy.json dmypy.json
+# System files
+ehthumbs.db
+Icon?
+Desktop.ini
