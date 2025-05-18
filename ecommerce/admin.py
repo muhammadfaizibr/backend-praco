@@ -1,6 +1,6 @@
 from django import forms
 from django.contrib import admin, messages
-from django.core.exceptions import ValidationError, ObjectDoesNotExist
+from django.core.exceptions import ValidationError
 from .models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
     TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, BillingAddress, ShippingAddress
@@ -8,15 +8,14 @@ from .models import (
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 from django.urls import reverse
-from django.core.mail import EmailMessage
-from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.core.files.base import ContentFile
 from django.urls import reverse, path
 from django.utils.html import format_html
+from backend_praco.utils import send_email
 
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'slug', 'created_at', 'grok_side_view')
+    list_display = ('name', 'slug', 'created_at')
     search_fields = ('name', 'slug')
     list_filter = ('created_at',)
     ordering = ('name',)
@@ -48,11 +47,6 @@ class CategoryAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the category."""
-        return f"{obj.name} (Slug: {obj.slug})"
-    grok_side_view.short_description = "Grok Side View"
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
@@ -70,7 +64,7 @@ class ProductImageInline(admin.TabularInline):
         }
 
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'slug', 'category', 'is_new', 'created_at', 'grok_side_view')
+    list_display = ('name', 'slug', 'category', 'is_new', 'created_at')
     search_fields = ('name', 'category__name')
     list_filter = ('category', 'is_new', 'created_at')
     ordering = ('name',)
@@ -103,11 +97,6 @@ class ProductAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
-
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the product."""
-        return f"{obj.name} in {obj.category.name}"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -158,7 +147,7 @@ class PricingTierInline(admin.TabularInline):
         }
 
 class PricingTierAdmin(admin.ModelAdmin):
-    list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'grok_side_view')
+    list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
     search_fields = ('product_variant__name', 'tier_type')
     list_filter = ('tier_type', 'no_end_range', 'created_at')
     ordering = ('product_variant', 'tier_type', 'range_start')
@@ -192,12 +181,6 @@ class PricingTierAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             return
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the pricing tier."""
-        # Format the range display: "20+" for no_end_range, "1-20" otherwise
-        range_str = f"{obj.range_start}+" if obj.no_end_range else f"{obj.range_start}-{obj.range_end}"
-        return f"{obj.tier_type.capitalize()} Tier: {range_str}"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -257,7 +240,7 @@ class TableFieldInline(admin.TabularInline):
 
 
 class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at', 'grok_side_view')
+    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at')
     search_fields = ('name', 'product__name')
     list_filter = ('status', 'show_units_per', 'created_at')
     ordering = ('product', 'name')
@@ -399,10 +382,6 @@ class ProductVariantAdmin(admin.ModelAdmin):
             obj.save()
             return
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the product variant."""
-        return f"{obj.name} (Units/Pack: {obj.units_per_pack}, Units/Pallet: {obj.units_per_pallet})"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -423,7 +402,7 @@ class PricingTierDataInline(admin.TabularInline):
         }
 
 class PricingTierDataAdmin(admin.ModelAdmin):
-    list_display = ('item', 'pricing_tier', 'price', 'created_at', 'grok_side_view')
+    list_display = ('item', 'pricing_tier', 'price', 'created_at')
     search_fields = ('item__sku', 'pricing_tier__product_variant__name')
     list_filter = ('created_at',)
     ordering = ('item', 'pricing_tier')
@@ -451,10 +430,6 @@ class PricingTierDataAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the pricing tier data."""
-        return f"Price: {obj.price} for {obj.item.sku}"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -462,7 +437,7 @@ class PricingTierDataAdmin(admin.ModelAdmin):
         }
 
 class TableFieldAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product_variant', 'field_type', 'long_field', 'created_at', 'grok_side_view')
+    list_display = ('name', 'product_variant', 'field_type', 'long_field', 'created_at')
     search_fields = ('name', 'product_variant__name')
     list_filter = ('field_type', 'long_field', 'created_at')
     ordering = ('product_variant', 'name')
@@ -496,10 +471,6 @@ class TableFieldAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the table field."""
-        return f"{obj.name} ({obj.field_type}, {'Long' if obj.long_field else 'Short'})"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -553,7 +524,7 @@ class ItemDataInline(admin.TabularInline):
         }
 
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at', 'grok_side_view')
+    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at')
     search_fields = ('sku', 'product_variant__name')
     list_filter = ('status', 'is_physical_product', 'track_inventory', 'created_at')
     ordering = ('sku', 'product_variant')
@@ -623,18 +594,13 @@ class ItemAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the item."""
-        return f"{obj.sku} ({obj.title or 'No Title'})"
-    grok_side_view.short_description = "Grok Side View"
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class ItemImageAdmin(admin.ModelAdmin):
-    list_display = ('item', 'image', 'created_at', 'grok_side_view')
+    list_display = ('item', 'image', 'created_at')
     search_fields = ('item__sku',)
     list_filter = ('created_at',)
     ordering = ('item', 'created_at')
@@ -662,18 +628,13 @@ class ItemImageAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the item image."""
-        return f"Image for {obj.item.sku}"
-    grok_side_view.short_description = "Grok Side View"
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class ItemDataAdmin(admin.ModelAdmin):
-    list_display = ('item', 'field', 'value_text', 'value_number', 'value_image', 'created_at', 'grok_side_view')
+    list_display = ('item', 'field', 'value_text', 'value_number', 'value_image', 'created_at')
     search_fields = ('item__sku', 'field__name')
     list_filter = ('field__field_type', 'created_at')
     ordering = ('item', 'field')
@@ -706,12 +667,6 @@ class ItemDataAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the item data."""
-        if obj.field.field_type == 'image' and obj.value_image:
-            return f"{obj.field.name}: Image"
-        return f"{obj.field.name}: {obj.value_text or obj.value_number or '-'}"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -719,7 +674,7 @@ class ItemDataAdmin(admin.ModelAdmin):
         }
 
 class UserExclusivePriceAdmin(admin.ModelAdmin):
-    list_display = ('user', 'item', 'discount_percentage', 'created_at', 'grok_side_view')
+    list_display = ('user', 'item', 'discount_percentage', 'created_at')
     search_fields = ('user__email', 'item__sku')
     list_filter = ('created_at',)
     ordering = ('user', 'item')
@@ -747,10 +702,6 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the user exclusive price."""
-        return f"{obj.user.email} gets {obj.discount_percentage}% off {obj.item.sku}"
-    grok_side_view.short_description = "Grok Side View"
 
     class Media:
         css = {
@@ -809,7 +760,7 @@ class CartItemInline(admin.TabularInline):
 
 class CartItemAdmin(admin.ModelAdmin):
     search_fields = ('cart__user__email', 'item__sku')
-    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at', 'grok_side_view')
+    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at')
     list_filter = ('created_at', 'updated_at')
     readonly_fields = ('created_at', 'updated_at', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
     ordering = ('cart', 'item')
@@ -899,18 +850,13 @@ class CartItemAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the cart item."""
-        return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)}, Discount: {self.get_discount_percentage(obj)}%)"
-    grok_side_view.short_description = "Grok Side View"
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
 
 class CartAdmin(admin.ModelAdmin):
-    list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at', 'grok_side_view')
+    list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at')
     search_fields = ('user__email',)
     list_filter = ('created_at', 'updated_at')
     ordering = ('user', 'created_at')
@@ -965,11 +911,6 @@ class CartAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-    def grok_side_view(self, obj):
-        """Grok Side View: Quick summary of the cart."""
-        return f"Cart for {obj.user.email} (Total: {obj.calculate_total()})"
-    grok_side_view.short_description = "Grok Side View"
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
@@ -998,6 +939,8 @@ class OrderItemInline(admin.TabularInline):
         except Exception as e:
             # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_price_per_unit.short_description = "Price Per Unit"
+    
 
     def get_price_per_pack(self, obj):
         try:
@@ -1008,6 +951,7 @@ class OrderItemInline(admin.TabularInline):
         except Exception as e:
             # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_price_per_pack.short_description = "Price Per Pack"
 
     def get_subtotal(self, obj):
         try:
@@ -1019,7 +963,9 @@ class OrderItemInline(admin.TabularInline):
             return Decimal('0.00')
         except Exception as e:
             # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
-            return Decimal('0.00')
+            return Decimal('0.00')   
+    get_subtotal.short_description = "Subtotal"
+
 
     def get_total(self, obj):
         try:
@@ -1030,6 +976,8 @@ class OrderItemInline(admin.TabularInline):
         except Exception as e:
             # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_total.short_description = "Total"
+    
 
     def get_weight(self, obj):
         try:
@@ -1044,6 +992,8 @@ class OrderItemInline(admin.TabularInline):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+    get_weight.short_description = "Weigth"
+    
 
 class OrderAdminForm(forms.ModelForm):
     class Meta:
@@ -1099,7 +1049,7 @@ class OrderAdmin(admin.ModelAdmin):
         'get_subtotal', 'vat', 'discount', 'shipping_cost', 'get_total',
         'get_total_units', 'get_total_packs', 'get_total_weight',
         'transaction_id', 'refund_transaction_id',
-        'created_at', 'updated_at', 'grok_side_view',
+        'created_at', 'updated_at',
         'invoice_actions', 'delivery_note_actions',
         'paid_receipt_actions', 'refund_receipt_actions'
     )
@@ -1170,6 +1120,7 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting subtotal for order {obj.id}: {str(e)}")
             return "€0.00"
+    get_subtotal.short_description = "Subtotal"
 
     def get_total(self, obj):
         try:
@@ -1177,6 +1128,7 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total for order {obj.id}: {str(e)}")
             return "€0.00"
+    get_total.short_description = "Total"
 
     def get_total_weight(self, obj):
         try:
@@ -1184,6 +1136,7 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total weight for order {obj.id}: {str(e)}")
             return "0.00 kg"
+    get_total_weight.short_description = "Weight"
 
     def get_total_units(self, obj):
         try:
@@ -1192,6 +1145,8 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total units for order {obj.id}: {str(e)}")
             return 0
+        
+    get_total_units.short_description = "Total Units"
 
     def get_total_packs(self, obj):
         try:
@@ -1200,13 +1155,8 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total packs for order {obj.id}: {str(e)}")
             return 0
-
-    def grok_side_view(self, obj):
-        try:
-            return f"Order for {obj.user.email} (Total: {self.get_total(obj)})"
-        except Exception as e:
-            logger.error(f"Error generating grok side view for order {obj.id}: {str(e)}")
-            return "Error generating order summary"
+        
+    get_total_packs.short_description = "Total Packs"
 
     def invoice_actions(self, obj):
         if not obj.id:
@@ -1296,20 +1246,20 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(request, "No invoice available to send.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
-        try:
-            email = EmailMessage(
-                subject=f"Invoice for Order #{order.id}",
-                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the invoice for your order #{order.id}.\n\nThank you for your purchase!\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=[order.user.email],
-            )
-            email.attach(f'invoice_order_{order.id}.pdf', order.invoice.read(), 'application/pdf')
-            email.send()
-            logger.info(f"Invoice email sent to {order.user.email} for order {order.id}")
+        user_name = order.user.get_full_name() or order.user.username
+        subject = f"Invoice for Order #{order.id}"
+        body = (
+            f'<p>Dear {user_name},</p>'
+            f'<p>Thank you for your purchase with Praco Packaging.</p>'
+            f'<p>Please find attached the invoice for your order #{order.id}.</p>'
+        )
+        attachments = [(f'invoice_order_{order.id}.pdf', order.invoice.read(), 'application/pdf')]
+
+        success = send_email(subject, body, order.user.email, is_html=True, attachments=attachments)
+        if success:
             self.message_user(request, f"Invoice email sent to {order.user.email}.")
-        except Exception as e:
-            logger.error(f"Error sending invoice email for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error sending invoice email: {str(e)}", level=messages.ERROR)
+        else:
+            self.message_user(request, f"Error sending invoice email to {order.user.email}.", level=messages.ERROR)
         return self.redirect_to_changelist()
 
     def send_delivery_note_email(self, request, order_id):
@@ -1318,20 +1268,19 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(request, "No delivery note available to send.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
-        try:
-            email = EmailMessage(
-                subject=f"Delivery Note for Order #{order.id}",
-                body=f"Dear Team,\n\nPlease find attached the delivery note for order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=['siddiqui.faizmuhammad@gmail.com'],
-            )
-            email.attach(f'delivery_note_order_{order.id}.pdf', order.delivery_note.read(), 'application/pdf')
-            email.send()
-            logger.info(f"Delivery note email sent to siddiqui.faizmuhammad@gmail.com for order {order.id}")
+        subject = f"Delivery Note for Order #{order.id}"
+        body = (
+            f'<p>Dear Team,</p>'
+            f'<p>Please find attached the delivery note for order #{order.id} from Praco Packaging.</p>'
+            f'<p>For any inquiries, please contact our logistics team at <a href="mailto:logistics@pracopackaging.com" class="text-blue-600 hover:underline">logistics@pracopackaging.com</a>.</p>'
+        )
+        attachments = [(f'delivery_note_order_{order.id}.pdf', order.delivery_note.read(), 'application/pdf')]
+
+        success = send_email(subject, body, 'siddiqui.faizmuhammad@gmail.com', is_html=True, attachments=attachments)
+        if success:
             self.message_user(request, "Delivery note email sent to siddiqui.faizmuhammad@gmail.com.")
-        except Exception as e:
-            logger.error(f"Error sending delivery note email for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error sending delivery note email: {str(e)}", level=messages.ERROR)
+        else:
+            self.message_user(request, "Error sending delivery note email.", level=messages.ERROR)
         return self.redirect_to_changelist()
 
     def send_paid_receipt_email(self, request, order_id):
@@ -1340,20 +1289,20 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(request, "No paid receipt available to send.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
-        try:
-            email = EmailMessage(
-                subject=f"Paid Receipt for Order #{order.id}",
-                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the paid receipt for your order #{order.id}.\n\nThank you for your payment!\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=[order.user.email],
-            )
-            email.attach(f'paid_receipt_order_{order.id}.pdf', order.paid_receipt.read(), 'application/pdf')
-            email.send()
-            logger.info(f"Paid receipt email sent to {order.user.email} for order {order.id}")
-            self.message_user(request, f"Paid receipt email sent to {order.user.email}.")
-        except Exception as e:
-            logger.error(f"Error sending paid receipt email for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error sending paid receipt email: {str(e)}", level=messages.ERROR)
+        user_name = order.user.get_full_name() or order.user.username
+        subject = f"Payment Receipt for Order #{order.id}"
+        body = (
+            f'<p>Dear {user_name},</p>'
+            f'<p>Thank you for your payment to Praco Packaging.</p>'
+            f'<p>Please find attached the payment receipt for your order #{order.id}.</p>'
+        )
+        attachments = [(f'paid_receipt_order_{order.id}.pdf', order.paid_receipt.read(), 'application/pdf')]
+
+        success = send_email(subject, body, order.user.email, is_html=True, attachments=attachments)
+        if success:
+            self.message_user(request, f"Payment receipt email sent to {order.user.email}.")
+        else:
+            self.message_user(request, f"Error sending payment receipt email to {order.user.email}.", level=messages.ERROR)
         return self.redirect_to_changelist()
 
     def send_refund_receipt_email(self, request, order_id):
@@ -1362,20 +1311,20 @@ class OrderAdmin(admin.ModelAdmin):
             self.message_user(request, "No refund receipt available to send.", level=messages.ERROR)
             return self.redirect_to_changelist()
 
-        try:
-            email = EmailMessage(
-                subject=f"refund Receipt for Order #{order.id}",
-                body=f"Dear {order.user.get_full_name() or order.user.username},\n\nPlease find attached the refund receipt for your order #{order.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=[order.user.email],
-            )
-            email.attach(f'refund_receipt_order_{order.id}.pdf', order.refund_receipt.read(), 'application/pdf')
-            email.send()
-            logger.info(f"refund receipt email sent to {order.user.email} for order {order.id}")
-            self.message_user(request, f"refund receipt email sent to {order.user.email}.")
-        except Exception as e:
-            logger.error(f"Error sending refund receipt email for order {order.id}: {str(e)}")
-            self.message_user(request, f"Error sending refund receipt email: {str(e)}", level=messages.ERROR)
+        user_name = order.user.get_full_name() or order.user.username
+        subject = f"Refund Receipt for Order #{order.id}"
+        body = (
+            f'<p>Dear {user_name},</p>'
+            f'<p>We have processed a refund for your order #{order.id} with Praco Packaging.</p>'
+            f'<p>Please find attached the refund receipt for your records.</p>'
+        )
+        attachments = [(f'refund_receipt_order_{order.id}.pdf', order.refund_receipt.read(), 'application/pdf')]
+
+        success = send_email(subject, body, order.user.email, is_html=True, attachments=attachments)
+        if success:
+            self.message_user(request, f"Refund receipt email sent to {order.user.email}.")
+        else:
+            self.message_user(request, f"Error sending refund receipt email to {order.user.email}.", level=messages.ERROR)
         return self.redirect_to_changelist()
 
     def regenerate_invoice(self, request, order_id):
@@ -1493,8 +1442,7 @@ class OrderItemAdmin(admin.ModelAdmin):
     list_display = (
         'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type',
         'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total',
-        'get_weight', 'user_exclusive_price', 'created_at', 'updated_at',
-        'grok_side_view'
+        'get_weight', 'user_exclusive_price', 'created_at', 'updated_at'
     )
     search_fields = ('order__user__email', 'item__sku')
     list_filter = ('unit_type', 'created_at', 'updated_at')
@@ -1534,6 +1482,8 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+        
+    get_price_per_unit.short_description = "Price Per Unit"
 
     def get_price_per_pack(self, obj):
         try:
@@ -1544,6 +1494,8 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_price_per_pack.short_description = "Price Per Pack"
+    
 
     def get_subtotal(self, obj):
         try:
@@ -1556,6 +1508,8 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_price_per_unit.short_description = "Price Subtotal"
+    
 
     def get_total(self, obj):
         try:
@@ -1566,6 +1520,8 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_price_per_unit.short_description = "Price Total"
+    
 
     def get_weight(self, obj):
         try:
@@ -1575,13 +1531,7 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting weight for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
-
-    def grok_side_view(self, obj):
-        try:
-            return f"{obj.pack_quantity} pack of {obj.item.sku} (Total: {self.get_total(obj)})"
-        except Exception as e:
-            logger.error(f"Error generating grok side view for order item {obj.id}: {str(e)}")
-            return "Error generating order item summary"
+    get_price_per_unit.short_description = "Price Total"
 
     class Media:
         css = {
@@ -1603,6 +1553,11 @@ class ShippingAddressAdmin(admin.ModelAdmin):
         }),
     )
 
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+
 class BillingAddressAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'country', 'created_at')
     list_filter = ('country', 'city', 'created_at')
@@ -1617,6 +1572,11 @@ class BillingAddressAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
 
 
 # Register all models with their respective admin classes

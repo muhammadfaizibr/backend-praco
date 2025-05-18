@@ -30,17 +30,3 @@ urlpatterns = [
     path('', include(router.urls)),
     path("ckeditor5/", include('django_ckeditor_5.urls')),
 ]
- 
-# cart
-# checkout
-# search / adavance search
-# ui fixes
-    # navigation styling
-    # loading animation
-# exclusive pricing # ALAHAMDULILLAH done
-
-# ui fixes
-# test apis
-
-# email sending
-# tracking

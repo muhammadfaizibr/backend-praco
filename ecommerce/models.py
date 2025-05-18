@@ -18,10 +18,11 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.colors import HexColor
 from reportlab.platypus.flowables import Flowable
-from django.core.mail import EmailMessage
 import uuid
 from datetime import timedelta
 from io import BytesIO
+from phonenumber_field.modelfields import PhoneNumberField
+from backend_praco.utils import send_email
 
 class Category(models.Model):
     """
@@ -600,16 +601,22 @@ class Item(models.Model):
                     errors['length'] = "Length must be a positive number for this category."
                 if not self.measurement_unit:
                     errors['measurement_unit'] = "Please select a measurement unit for this category."
-                if self.measurement_unit not in ['MM', 'CM', 'IN', 'M']:
+                if self.measurement_unit and self.measurement_unit not in ['MM', 'CM', 'IN', 'M']:
                     errors['measurement_unit'] = "Please select a valid measurement unit (MM, CM, IN, M)."
             else:
-                self.height = None
-                self.width = None
-                self.length = None
-                self.measurement_unit = None
-                self.height_in_inches = None
-                self.width_in_inches = None
-                self.length_in_inches = None
+                # Only clear dimensions if they are not provided or invalid
+                if not all([self.height, self.width, self.length, self.measurement_unit]) or \
+                any([self.height is not None and self.height <= 0,
+                        self.width is not None and self.width <= 0,
+                        self.length is not None and self.length <= 0,
+                        self.measurement_unit and self.measurement_unit not in ['MM', 'CM', 'IN', 'M']]):
+                    self.height = None
+                    self.width = None
+                    self.length = None
+                    self.measurement_unit = None
+                    self.height_in_inches = None
+                    self.width_in_inches = None
+                    self.length_in_inches = None
 
             # Validate PricingTierData entries for status
             if self.pk and self.status == 'active':
@@ -624,33 +631,33 @@ class Item(models.Model):
                     errors['status'] = "Unable to validate pricing tiers due to invalid product variant relationship."
                     raise ValidationError(errors) from e
 
-        # Validate physical product details
-        if self.is_physical_product:
-            if self.weight is None or self.weight <= 0:
-                errors['weight'] = "Weight must be a positive number for physical products."
-            if not self.weight_unit:
-                errors['weight_unit'] = "Please select a weight unit for physical products."
-        else:
-            self.weight = None
-            self.weight_unit = None
+            # Validate physical product details
+            if self.is_physical_product:
+                if self.weight is None or self.weight <= 0:
+                    errors['weight'] = "Weight must be a positive number for physical products."
+                if not self.weight_unit:
+                    errors['weight_unit'] = "Please select a weight unit for physical products."
+            else:
+                self.weight = None
+                self.weight_unit = None
 
-        # Validate inventory tracking
-        if self.track_inventory:
-            if self.stock is None or self.stock < 0:
-                errors['stock'] = "Stock must be a non-negative number when tracking inventory."
-            if not self.title:
-                errors['title'] = "Title is required when tracking inventory."
-            # Validate that stock is a multiple of product_variant.units_per_pack
-            if self.product_variant and self.stock is not None:
-                units_per_pack = self.product_variant.units_per_pack
-                if units_per_pack > 0 and self.stock % units_per_pack != 0:
-                    errors['stock'] = f"Stock must be a multiple of the product variant's units per pack ({units_per_pack}). Current stock: {self.stock}."
-        else:
-            self.stock = None
-            self.title = None
+            # Validate inventory tracking
+            if self.track_inventory:
+                if self.stock is None or self.stock < 0:
+                    errors['stock'] = "Stock must be a non-negative number when tracking inventory."
+                if not self.title:
+                    errors['title'] = "Title is required when tracking inventory."
+                # Validate that stock is a multiple of product_variant.units_per_pack
+                if self.product_variant and self.stock is not None:
+                    units_per_pack = self.product_variant.units_per_pack
+                    if units_per_pack > 0 and self.stock % units_per_pack != 0:
+                        errors['stock'] = f"Stock must be a multiple of the product variant's units per pack ({units_per_pack}). Current stock: {self.stock}."
+            else:
+                self.stock = None
+                self.title = None
 
-        if errors:
-            raise ValidationError(errors)
+            if errors:
+                raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
         # Perform validation first
@@ -1060,7 +1067,7 @@ class ShippingAddress(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='shipping_addresses')
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
-    telephone_number = models.CharField(max_length=20)
+    telephone_number = PhoneNumberField()
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=100, blank=True)
@@ -1077,7 +1084,7 @@ class BillingAddress(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='billing_addresses')
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
-    telephone_number = models.CharField(max_length=20)
+    telephone_number = PhoneNumberField()
     street = models.CharField(max_length=255)
     city = models.CharField(max_length=100)
     state = models.CharField(max_length=100, blank=True)
@@ -1089,6 +1096,7 @@ class BillingAddress(models.Model):
     class Meta:
         verbose_name = 'billing address'
         verbose_name_plural = 'billing addresses'
+        
 logger = logging.getLogger(__name__)
 
 class HRFlowable(Flowable):
@@ -1986,15 +1994,18 @@ def handle_order_creation(sender, instance, created, **kwargs):
         try:
             if instance.invoice and instance.user.email:
                 user_name = instance.user.get_full_name() if hasattr(instance.user, 'get_full_name') else instance.user.username
-                email = EmailMessage(
-                    subject=f"Invoice for Order #{instance.id}",
-                    body=f"Dear {user_name},\n\nPlease find attached the invoice for your order #{instance.id}.\n\nThank you for your purchase!\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    to=[instance.user.email],
+                subject = f"Invoice for Order #{instance.id}"
+                body = (
+                    f'<p>Dear {user_name},</p>'
+                    f'<p>Thank you for your purchase with Praco Packaging.</p>'
+                    f'<p>Please find attached the invoice for your order #{instance.id}.</p>'
                 )
-                email.attach(f'invoice_order_{instance.id}.pdf', instance.invoice.read(), 'application/pdf')
-                email.send()
-                logger.info(f"Invoice email sent to {instance.user.email} for order {instance.id}")
+                attachments = [(f'invoice_order_{instance.id}.pdf', instance.invoice.read(), 'application/pdf')]
+                success = send_email(subject, body, instance.user.email, is_html=True, attachments=attachments)
+                if success:
+                    logger.info(f"Invoice email sent to {instance.user.email} for order {instance.id}")
+                else:
+                    logger.error(f"Failed to send invoice email for order {instance.id}")
         except Exception as e:
             logger.error(f"Error sending invoice email for order {instance.id}: {str(e)}")
 
@@ -2008,15 +2019,18 @@ def handle_payment_status_change(sender, instance, **kwargs):
                 if instance.payment_status == 'COMPLETED':
                     instance.generate_and_save_payment_receipts()
                     if instance.delivery_note:
-                        email = EmailMessage(
-                            subject=f"Delivery Note for Order #{instance.id}",
-                            body=f"Dear Team,\n\nPlease find attached the delivery note for order #{instance.id}.\n\nBest regards,\nPraco Packaging Supplies Ltd.",
-                            from_email=settings.DEFAULT_FROM_EMAIL,
-                            to=['siddiqui.faizmuhammad@gmail.com'],
+                        subject = f"Delivery Note for Order #{instance.id}"
+                        body = (
+                            f'<p>Dear Team,</p>'
+                            f'<p>Please find attached the delivery note for order #{instance.id} from Praco Packaging.</p>'
+                            f'<p>For any inquiries, please contact our logistics team at <a href="mailto:logistics@pracopackaging.com" class="text-blue-600 hover:underline">logistics@pracopackaging.com</a>.</p>'
                         )
-                        email.attach(f'delivery_note_order_{instance.id}.pdf', instance.delivery_note.read(), 'application/pdf')
-                        email.send()
-                        logger.info(f"Delivery note email sent to siddiqui.faizmuhammad@gmail.com for order {instance.id}")
+                        attachments = [(f'delivery_note_order_{instance.id}.pdf', instance.delivery_note.read(), 'application/pdf')]
+                        success = send_email(subject, body, 'siddiqui.faizmuhammad@gmail.com', is_html=True, attachments=attachments)
+                        if success:
+                            logger.info(f"Delivery note email sent to siddiqui.faizmuhammad@gmail.com for order {instance.id}")
+                        else:
+                            logger.error(f"Failed to send delivery note email for order {instance.id}")
                 elif instance.payment_status == 'REFUND':
                     instance.generate_and_save_payment_receipts()
     except Exception as e:
@@ -2218,3 +2232,9 @@ class OrderItem(models.Model):
         except Exception as e:
             logger.error(f"Error saving order item {self.id}: {str(e)}")
             raise ValidationError({"__all__": "An unexpected error occurred while saving the order item."})
+
+
+# email template
+# testing
+# deploy
+# products upload

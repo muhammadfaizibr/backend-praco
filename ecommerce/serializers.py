@@ -822,24 +822,12 @@ class OrderSerializer(serializers.ModelSerializer):
             order = super().create(validated_data)
             logger.info(f"Order {order.id} created for user {user.id}")
 
-            from .models import Cart, CartItem, UserExclusivePrice
+            from .models import Cart, CartItem
             cart = Cart.objects.filter(user=user).first()
             if cart and cart.items.exists():
                 for cart_item in cart.items.all():
                     if cart_item.item and cart_item.pricing_tier and cart_item.pack_quantity:
-                        user_exclusive_price = cart_item.user_exclusive_price
-                        if user_exclusive_price is None:
-                            try:
-                                user_exclusive_price, created = UserExclusivePrice.objects.get_or_create(
-                                    user=user,
-                                    item=cart_item.item,
-                                    defaults={}
-                                )
-                                if created:
-                                    logger.info(f"Created default UserExclusivePrice for user {user.id}, item {cart_item.item.id}")
-                            except Exception as e:
-                                logger.error(f"Failed to create UserExclusivePrice for user {user.id}, item {cart_item.item.id}: {str(e)}")
-                                user_exclusive_price = None
+                        user_exclusive_price = cart_item.user_exclusive_price  # Use only if exists
                         OrderItem.objects.create(
                             order=order,
                             item=cart_item.item,
@@ -863,6 +851,7 @@ class OrderSerializer(serializers.ModelSerializer):
             logger.info(f"PDFs and receipts generated for order {order.id}")
 
             return order
+
 
     def update(self, instance, validated_data):
         logger.info(f"Updating order {instance.id} with validated data: {validated_data}")

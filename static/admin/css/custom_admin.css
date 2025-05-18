@@ -2,6 +2,7 @@
 html .form-row input[type="text"],
 html .form-row input[type="number"],
 html .form-row input[type="email"],
+html .form-row input[type="tel"],
 html .form-row textarea,
 html .form-row select {
     background-color: rgb(249, 250, 251);
@@ -19,6 +20,7 @@ html .form-row select {
 html.dark .form-row input[type="text"],
 html.dark .form-row input[type="number"],
 html.dark .form-row input[type="email"],
+html.dark .form-row input[type="tel"],
 html.dark .form-row textarea,
 html.dark .form-row select {
     background-color: rgba(31, 41, 55);
@@ -35,6 +37,7 @@ html.dark .form-row select {
 .form-row input[type="text"]:focus,
 .form-row input[type="number"]:focus,
 .form-row input[type="email"]:focus,
+.form-row input[type="tel"]:focus,
 .form-row textarea:focus,
 .form-row select:focus {
     border-color: #FF6A01; /* Match Unfold's primary color */

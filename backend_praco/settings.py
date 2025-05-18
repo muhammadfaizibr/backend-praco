@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'administration',
     'payment',
     'nested_admin',
+    "phonenumber_field",
 ]
 
 MIDDLEWARE = [

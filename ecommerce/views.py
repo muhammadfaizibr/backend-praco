@@ -338,65 +338,49 @@ class ItemViewSet(viewsets.ModelViewSet):
             except (ValueError, TypeError):
                 return qs.none()
 
+            # Convert dimensions to inches if measurement_unit is not 'IN'
             to_inches = {
                 'MM': Decimal('0.0393701'),
                 'CM': Decimal('0.393701'),
                 'IN': Decimal('1.0'),
                 'M': Decimal('39.3701'),
             }
-            from_inches = {
-                'MM': Decimal('25.4'),
-                'CM': Decimal('2.54'),
-                'IN': Decimal('1.0'),
-                'M': Decimal('0.0254'),
-            }
+            if measurement_unit and measurement_unit != 'IN':
+                width = (width * to_inches[measurement_unit]).quantize(Decimal('0.01'))
+                length = (length * to_inches[measurement_unit]).quantize(Decimal('0.01'))
+                height = (height * to_inches[measurement_unit]).quantize(Decimal('0.01'))
 
+            # Build dimension filter using height_in_inches, width_in_inches, length_in_inches
             dimension_filter = Q()
-            for item in qs:
-                item_width = item.width
-                item_length = item.length
-                item_height = item.height
-                item_unit = item.measurement_unit
-
-                if item_width is None or item_length is None or item_height is None or not item_unit:
-                    continue
-
-                if item_unit != measurement_unit and measurement_unit:
-                    item_width = item_width * to_inches[item_unit]
-                    item_length = item_length * to_inches[item_unit]
-                    item_height = item_height * to_inches[item_unit]
-                    item_width = item_width * from_inches[measurement_unit]
-                    item_length = item_length * from_inches[measurement_unit]
-                    item_height = item_height * from_inches[measurement_unit]
-
-                if approx_size:
-                    width_min = width * Decimal('0.9')
-                    width_max = width * Decimal('1.1')
-                    length_min = length * Decimal('0.9')
-                    length_max = length * Decimal('1.1')
-                    height_min = height * Decimal('0.9')
-                    height_max = height * Decimal('1.1')
-                    dimension_filter |= Q(
-                        id=item.id,
-                        width__gte=width_min, width__lte=width_max,
-                        length__gte=length_min, length__lte=length_max,
-                        height__gte=height_min, height__lte=height_max
-                    )
-                elif minimum_size:
-                    dimension_filter |= Q(
-                        id=item.id,
-                        width__gte=width,
-                        length__gte=length,
-                        height__gte=height
-                    )
-                else:
-                    tolerance = Decimal('0.01')
-                    dimension_filter |= Q(
-                        id=item.id,
-                        width__gte=width - tolerance, width__lte=width + tolerance,
-                        length__gte=length - tolerance, length__lte=length + tolerance,
-                        height__gte=height - tolerance, height__lte=height + tolerance
-                    )
+            if approx_size:
+                # ±5 inch margin for approximate size
+                margin = Decimal('5.0')
+                width_min = width - margin
+                width_max = width + margin
+                length_min = length - margin
+                length_max = length + margin
+                height_min = height - margin
+                height_max = height + margin
+                dimension_filter = Q(
+                    width_in_inches__gte=width_min, width_in_inches__lte=width_max,
+                    length_in_inches__gte=length_min, length_in_inches__lte=length_max,
+                    height_in_inches__gte=height_min, height_in_inches__lte=height_max
+                )
+            elif minimum_size:
+                # Minimum size: dimensions >= provided values
+                dimension_filter = Q(
+                    width_in_inches__gte=width,
+                    length_in_inches__gte=length,
+                    height_in_inches__gte=height
+                )
+            else:
+                # Exact match with ±0.01 inch tolerance
+                tolerance = Decimal('0.01')
+                dimension_filter = Q(
+                    width_in_inches__gte=width - tolerance, width_in_inches__lte=width + tolerance,
+                    length_in_inches__gte=length - tolerance, length_in_inches__lte=length + tolerance,
+                    height_in_inches__gte=height - tolerance, height_in_inches__lte=height + tolerance
+                )
 
             qs = qs.filter(dimension_filter)
 
@@ -406,7 +390,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context.update({'request': self.request})
         return context
-
+    
 class ItemDataViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
