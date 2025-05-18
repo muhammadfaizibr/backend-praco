@@ -32,7 +32,8 @@ DEBUG = True
 
 ALLOWED_HOSTS = [
     "api.praco.co.uk",
-    "127.0.0.1"
+    "127.0.0.1",
+    "app.praco.co.uk",
 ]
 
 # Application definition
@@ -89,17 +90,30 @@ WSGI_APPLICATION = 'backend_praco.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'pracodb',
-        'USER': 'postgres',
-        'PASSWORD': 'admin',
-        'HOST': 'localhost',
-        'PORT': '5432',
-    }
-}
 
+if DEBUG:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'pracodb',
+            'USER': 'postgres',
+            'PASSWORD': 'admin',
+            'HOST': 'localhost',
+            'PORT': '5432',
+        }
+    }
+
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'pracodb',
+            'USER': 'admin',
+            'PASSWORD': '9TeA3dJ7cZT55?cJbJ@3',
+            'HOST': 'localhost',
+            'PORT': '5432',
+        }
+    }
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 AUTH_PASSWORD_VALIDATORS = [
@@ -169,7 +183,10 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://api.praco.co.uk"
+    "https://api.praco.co.uk",
+    "http://api.praco.co.uk",
+    "https://app.praco.co.uk",
+    "http://app.praco.co.uk",
 ]
 
 UNFOLD = {
