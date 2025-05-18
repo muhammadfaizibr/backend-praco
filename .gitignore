@@ -21,7 +21,6 @@ Pipfile.lock
 poetry.lock
 
 # Django static and media files
-/static/
 media/
 
 # Django migration files

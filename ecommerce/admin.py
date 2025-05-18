@@ -197,6 +197,7 @@ class TableFieldForm(forms.ModelForm):
         model = TableField
         fields = '__all__'
 
+
     def clean_name(self):
         name = self.cleaned_data.get('name')
         if name and name.lower() in TableField.RESERVED_NAMES:
@@ -209,6 +210,7 @@ class TableFieldForm(forms.ModelForm):
         if field_type and field_type not in valid_types:
             raise ValidationError(f"Field type must be one of: {', '.join(valid_types)}.")
         return field_type
+
 
 class TableFieldInline(admin.TabularInline):
     model = TableField

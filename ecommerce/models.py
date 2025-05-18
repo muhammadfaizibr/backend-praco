@@ -1055,7 +1055,7 @@ class Cart(models.Model):
     def save(self, *args, **kwargs):
         if not self.pk:
             super().save(*args, **kwargs)
-        self.update_cart()
+        # self.update_cart()
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def create_user_cart(sender, instance, created, **kwargs):
