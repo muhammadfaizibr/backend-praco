@@ -102,36 +102,59 @@ class ProductAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
-
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
-    extra = 1
-    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'edit_link')
-    readonly_fields = ('created_at', 'edit_link')
+    extra = 0  # No extra empty forms
+    fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'edit_link', 'add_button')
+    readonly_fields = ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'edit_link', 'add_button')
+
+    def get_extra(self, request, obj=None, **kwargs):
+        return 0  # No extra forms since we use the popup button
+
+    def get_readonly_fields(self, request, obj=None):
+        return ('tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at', 'edit_link', 'add_button')
 
     def get_formset(self, request, obj=None, **kwargs):
+        self.parent_obj = obj  # Store parent object for add_button
         formset = super().get_formset(request, obj, **kwargs)
         class InlineForm(formset.form):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 if self.instance.pk:
-                    for field_name in ['tier_type', 'range_start', 'range_end', 'no_end_range']:
-                        self.fields[field_name].disabled = True
+                    for field_name in self.fields:
+                        if field_name not in ('edit_link', 'add_button'):
+                            self.fields[field_name].disabled = True
+                else:
+                    if 'tier_type' in self.fields:
+                        self.fields['tier_type'].help_text = "Select the tier type for the new pricing tier."
+                    # Hide add_button for new forms
+                    if 'add_button' in self.fields:
+                        self.fields['add_button'].widget = self.fields['add_button'].hidden_widget()
         formset.form = InlineForm
         return formset
 
     def edit_link(self, obj):
         if obj.pk:
             url = reverse('admin:%s_%s_change' % (obj._meta.app_label, obj._meta.model_name), args=[obj.pk])
-            # Format the range display: "20+" for no_end_range, "1-20" otherwise
             range_str = f"{obj.range_start}+" if obj.no_end_range else f"{obj.range_start}-{obj.range_end}"
             return format_html(
-                '<a class="btn btn-primary btn-sm" href="{}" target="_blank" onclick="window.open(\'{}\', \'_blank\', \'width=800,height=600\'); return false;">Edit {}</a>',
+                '<a class="btn btn-primary btn-sm" href="{}" onclick="window.open(\'{}\', \'_blank\', \'width=800,height=600\');return false;">Edit {}</a>',
                 url, url, range_str
             )
         return format_html('<span>-</span>')
-    edit_link.short_description = "Edit Tier"
+    edit_link.short_description = 'Edit Tier'
+
+    def add_button(self, obj=None):
+        if hasattr(self, 'parent_obj') and self.parent_obj and self.parent_obj.pk:
+            existing_tiers = self.parent_obj.pricing_tiers.all()
+            if not existing_tiers.filter(tier_type='pack').exists() or (self.parent_obj.show_units_per == 'both' and not existing_tiers.filter(tier_type='pallet').exists()):
+                url = reverse('admin:%s_%s_add' % (self.model._meta.app_label, self.model._meta.model_name)) + f'?product_variant={self.parent_obj.pk}'
+                return format_html(
+                    '<a class="btn btn-success btn-sm" href="{}" onclick="window.open(\'{}\', \'_blank\', \'width=800,height=600\');return false;">Add</a>',
+                    url, url
+                )
+        return format_html('<span>-</span>')
+    add_button.short_description = 'Add'
 
     def formfield_for_dbfield(self, db_field, request, **kwargs):
         field = super().formfield_for_dbfield(db_field, request, **kwargs)
@@ -140,6 +163,12 @@ class PricingTierInline(admin.TabularInline):
         elif db_field.name == 'range_end':
             field.help_text = "Must be greater than range start unless 'No End Range' is checked."
         return field
+
+    def has_add_permission(self, request, obj=None):
+        return False  # Disable inline form addition
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     class Media:
         css = {
@@ -162,7 +191,7 @@ class PricingTierAdmin(admin.ModelAdmin):
         ('Range Details', {
             'fields': ('range_start', 'range_end', 'no_end_range'),
             'classes': ('inline-group',),
-            'description': 'Specify the quantity range for this tier. First tier must start from 1, and ranges must be sequential.'
+            'description': 'Specify the quantity range for this tier. First tier must start from 1.'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -173,6 +202,17 @@ class PricingTierAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         try:
+            if not change:
+                existing_tiers = PricingTier.objects.filter(
+                    product_variant=obj.product_variant,
+                    tier_type=obj.tier_type
+                )
+                if existing_tiers.exists():
+                    messages.error(request, f"A {obj.tier_type} pricing tier already exists for this product variant.")
+                    return
+                if obj.range_start != 1:
+                    messages.error(request, "The pricing tier must start from 1.")
+                    return
             obj.full_clean()
             obj.save()
         except ValidationError as e:
@@ -180,7 +220,6 @@ class PricingTierAdmin(admin.ModelAdmin):
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             return
-
 
     class Media:
         css = {
@@ -240,7 +279,6 @@ class TableFieldInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
-
 class ProductVariantAdmin(admin.ModelAdmin):
     list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at')
     search_fields = ('name', 'product__name')
@@ -287,14 +325,15 @@ class ProductVariantAdmin(admin.ModelAdmin):
         try:
             super().save_related(request, form, formsets, change)
             obj = form.instance
-            if obj.pk:  # Only validate if the object exists
+            if obj.pk:
                 pricing_tiers = obj.pricing_tiers.all()
-                pack_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pack'], key=lambda x: x.range_start)
-                pallet_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pallet'], key=lambda x: x.range_start)
+                pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
+                pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
 
+                # Validate single tier and show_units_per
                 if obj.show_units_per == 'pack':
-                    if not pack_tiers:
-                        messages.error(request, "At least one 'pack' pricing tier is required when show_units_per is 'Pack'.")
+                    if len(pack_tiers) > 1:
+                        messages.error(request, "Only one 'pack' pricing tier is allowed.")
                         obj.status = 'draft'
                         obj.save()
                         return
@@ -304,73 +343,31 @@ class ProductVariantAdmin(admin.ModelAdmin):
                         obj.save()
                         return
                     if pack_tiers and pack_tiers[0].range_start != 1:
-                        messages.error(request, "The first 'pack' pricing tier must start from 1.")
+                        messages.error(request, "The 'pack' pricing tier must start from 1.")
                         obj.status = 'draft'
                         obj.save()
                         return
-                    for i in range(len(pack_tiers) - 1):
-                        current = pack_tiers[i]
-                        next_tier = pack_tiers[i + 1]
-                        if current.no_end_range:
-                            if i != len(pack_tiers) - 2:  # Ensure no_end_range is only on the last tier
-                                messages.error(request, "A tier with 'No End Range' checked must be the last tier.")
-                                obj.status = 'draft'
-                                obj.save()
-                                return
-                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                            messages.error(request, f"Pack pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
-                            obj.status = 'draft'
-                            obj.save()
-                            return
                 elif obj.show_units_per == 'both':
-                    if not pack_tiers:
-                        messages.error(request, "At least one 'pack' pricing tier is required when show_units_per is 'Both'.")
+                    if len(pack_tiers) > 1:
+                        messages.error(request, "Only one 'pack' pricing tier is allowed.")
                         obj.status = 'draft'
                         obj.save()
                         return
-                    if not pallet_tiers:
-                        messages.error(request, "At least one 'pallet' pricing tier is required when show_units_per is 'Both'.")
+                    if len(pallet_tiers) > 1:
+                        messages.error(request, "Only one 'pallet' pricing tier is allowed.")
                         obj.status = 'draft'
                         obj.save()
                         return
                     if pack_tiers and pack_tiers[0].range_start != 1:
-                        messages.error(request, "The first 'pack' pricing tier must start from 1.")
+                        messages.error(request, "The 'pack' pricing tier must start from 1.")
                         obj.status = 'draft'
                         obj.save()
                         return
                     if pallet_tiers and pallet_tiers[0].range_start != 1:
-                        messages.error(request, "The first 'pallet' pricing tier must start from 1.")
+                        messages.error(request, "The 'pallet' pricing tier must start from 1.")
                         obj.status = 'draft'
                         obj.save()
                         return
-                    for i in range(len(pack_tiers) - 1):
-                        current = pack_tiers[i]
-                        next_tier = pack_tiers[i + 1]
-                        if current.no_end_range:
-                            if i != len(pack_tiers) - 2:
-                                messages.error(request, "A tier with 'No End Range' checked must be the last tier for pack.")
-                                obj.status = 'draft'
-                                obj.save()
-                                return
-                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                            messages.error(request, f"Pack pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
-                            obj.status = 'draft'
-                            obj.save()
-                            return
-                    for i in range(len(pallet_tiers) - 1):
-                        current = pallet_tiers[i]
-                        next_tier = pallet_tiers[i + 1]
-                        if current.no_end_range:
-                            if i != len(pallet_tiers) - 2:
-                                messages.error(request, "A tier with 'No End Range' checked must be the last tier for pallet.")
-                                obj.status = 'draft'
-                                obj.save()
-                                return
-                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                            messages.error(request, f"Pallet pricing tiers must be sequential with no gaps. Range {current.range_start}-{'+' if current.no_end_range else current.range_end} does not connect to {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end}.")
-                            obj.status = 'draft'
-                            obj.save()
-                            return
                 else:
                     messages.error(request, f"Invalid show_units_per value: {obj.show_units_per}")
                     obj.status = 'draft'
@@ -383,7 +380,6 @@ class ProductVariantAdmin(admin.ModelAdmin):
             obj.status = 'draft'
             obj.save()
             return
-
 
     class Media:
         css = {

@@ -500,7 +500,7 @@ class Item(models.Model):
     title = models.CharField(max_length=255, blank=True, null=True)
     sku = models.CharField(max_length=100, unique=True)
     is_physical_product = models.BooleanField(default=False)
-    weight = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    weight = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     weight_unit = models.CharField(max_length=2, choices=WEIGHT_UNIT_CHOICES, blank=True, null=True)
     track_inventory = models.BooleanField(default=False)
     stock = models.IntegerField(blank=True, null=True)
@@ -654,7 +654,7 @@ class Item(models.Model):
                         errors['stock'] = f"Stock must be a multiple of the product variant's units per pack ({units_per_pack}). Current stock: {self.stock}."
             else:
                 self.stock = None
-                self.title = None
+                # self.title = None
 
             if errors:
                 raise ValidationError(errors)
@@ -1378,7 +1378,7 @@ class Order(models.Model):
                             total_display += f"\n{discount_percent}% off"
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title,
+                            item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
@@ -1390,7 +1390,7 @@ class Order(models.Model):
             else:
                 logger.warning(f"No items found for order {self.id}")
                 data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[2.5*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[4*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1510,7 +1510,7 @@ class Order(models.Model):
                         total_units = item.total_units
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title,
+                            item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             str(total_units)
                         ])
@@ -1520,7 +1520,7 @@ class Order(models.Model):
             else:
                 logger.warning(f"No items found for order {self.id}")
                 data.append(["N/A", "No items available", "0", "0"])
-            table = Table(data, colWidths=[3.5*cm, 6.5*cm, 2.5*cm, 3*cm])
+            table = Table(data, colWidths=[4*cm, 6.5*cm, 2.5*cm, 3*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1629,7 +1629,7 @@ class Order(models.Model):
                             total_display += f"\n{discount_percent}% off"
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title,
+                            item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
@@ -1640,7 +1640,7 @@ class Order(models.Model):
                         data.append(["N/A", "Error", "0", "€0.00", "€0.00", "€0.00"])
             else:
                 data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[2.5*cm, 3.5*cm, 3*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[4*cm, 3.5*cm, 3*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1770,7 +1770,7 @@ class Order(models.Model):
                             total_display += f"\n{discount_percent}% off"
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title,
+                            item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
@@ -1781,7 +1781,7 @@ class Order(models.Model):
                         data.append(["N/A", "Error", "0", "€0.00", "€0.00", "€0.00"])
             else:
                 data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[2.5*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[4*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
