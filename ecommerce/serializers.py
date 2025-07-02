@@ -131,26 +131,23 @@ class ProductVariantSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductVariant
         fields = [
-            'id', 'product', 'name', 'units_per_pack', 'units_per_pallet',
+            'id', 'product', 'name', 'units_per_pack',
             'show_units_per', 'created_at', 'pricing_tiers'
         ]
 
     def validate(self, data):
         show_units_per = data.get('show_units_per')
         units_per_pack = data.get('units_per_pack', 6)
-        units_per_pallet = data.get('units_per_pallet', 0)
 
         # Validate units configuration
-        if show_units_per == 'both' and units_per_pallet <= units_per_pack:
-            raise serializers.ValidationError("Units per pallet must be greater than units per pack when show_units_per is 'Both'.")
-        if show_units_per == 'pack' and units_per_pallet != 0:
-            raise serializers.ValidationError("Units per pallet must be 0 when show_units_per is 'Pack'.")
+        if show_units_per == 'both' and units_per_pack <= 0:
+            raise serializers.ValidationError("Units per pack must be a positive number when show_units_per is 'Both'.")
 
         # Validate pricing tiers if instance exists
         if self.instance and self.instance.pk:
             pricing_tiers = self.instance.pricing_tiers.all()
             pack_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pack'], key=lambda x: x.range_start)
-            pallet_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pallet'], key=lambda x: x.range_start)
+            pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
 
             if show_units_per == 'pack':
                 if not pack_tiers:
@@ -160,13 +157,15 @@ class ProductVariantSerializer(serializers.ModelSerializer):
                 pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
                 if len(pack_no_end) != 1:
                     raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
-                if pack_tiers[0].range_start != 1:
-                    raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
-                for i in range(len(pack_tiers) - 1):
-                    current = pack_tiers[i]
-                    next_tier = pack_tiers[i + 1]
-                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                        raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps.")
+                # Validate pack tiers are sequential
+                if pack_tiers:
+                    if pack_tiers[0].range_start != 1:
+                        raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
+                    for i in range(len(pack_tiers) - 1):
+                        current = pack_tiers[i]
+                        next_tier = pack_tiers[i + 1]
+                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                            raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps or overlaps.")
             elif show_units_per == 'both':
                 if not pack_tiers:
                     raise serializers.ValidationError("At least one 'pack' pricing tier is required when show_units_per is 'Both'.")
@@ -178,20 +177,15 @@ class ProductVariantSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError("Exactly one 'pack' pricing tier must have 'No End Range' checked.")
                 if len(pallet_no_end) != 1:
                     raise serializers.ValidationError("Exactly one 'pallet' pricing tier must have 'No End Range' checked.")
-                if pack_tiers[0].range_start != 1:
-                    raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
-                if pallet_tiers[0].range_start != 1:
-                    raise serializers.ValidationError("The first 'pallet' pricing tier must start from 1.")
-                for i in range(len(pack_tiers) - 1):
-                    current = pack_tiers[i]
-                    next_tier = pack_tiers[i + 1]
-                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                        raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps.")
-                for i in range(len(pallet_tiers) - 1):
-                    current = pallet_tiers[i]
-                    next_tier = pallet_tiers[i + 1]
-                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
-                        raise serializers.ValidationError("Pallet pricing tiers must be sequential with no gaps.")
+                # Validate pack tiers are sequential
+                if pack_tiers:
+                    if pack_tiers[0].range_start != 1:
+                        raise serializers.ValidationError("The first 'pack' pricing tier must start from 1.")
+                    for i in range(len(pack_tiers) - 1):
+                        current = pack_tiers[i]
+                        next_tier = pack_tiers[i + 1]
+                        if not current.no_end_range and next_tier.range_start != current.range_end + 1:
+                            raise serializers.ValidationError("Pack pricing tiers must be sequential with no gaps or overlaps.")
 
         return data
 
@@ -260,6 +254,7 @@ class ItemDataSerializer(serializers.ModelSerializer):
         data['value_image'] = value_image
         return data
 
+
 class ItemSerializer(serializers.ModelSerializer):
     images = ItemImageSerializer(many=True, read_only=True)
     pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
@@ -289,6 +284,9 @@ class ItemSerializer(serializers.ModelSerializer):
         product_variant = data.get('product_variant')
         if not product_variant and self.instance:
             product_variant = self.instance.product_variant
+
+        if product_variant and product_variant.show_units_per == 'both' and not is_physical_product:
+            raise serializers.ValidationError("Item must be a physical product when product variant show units per is set to 'both'.")
 
         required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
         category_name = ''

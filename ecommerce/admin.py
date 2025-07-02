@@ -102,6 +102,8 @@ class ProductAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
+
 class PricingTierInline(admin.TabularInline):
     model = PricingTier
     extra = 0  # No extra empty forms
@@ -191,7 +193,7 @@ class PricingTierAdmin(admin.ModelAdmin):
         ('Range Details', {
             'fields': ('range_start', 'range_end', 'no_end_range'),
             'classes': ('inline-group',),
-            'description': 'Specify the quantity range for this tier. First tier must start from 1.'
+            'description': 'For pack tiers, specify the quantity range (first tier starts at 1, sequential with no gaps). For pallet tiers, these fields are ignored as pricing is weight-based.'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -202,17 +204,55 @@ class PricingTierAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         try:
-            if not change:
-                existing_tiers = PricingTier.objects.filter(
-                    product_variant=obj.product_variant,
-                    tier_type=obj.tier_type
-                )
+            # Validate tier constraints
+            existing_tiers = PricingTier.objects.filter(
+                product_variant=obj.product_variant,
+                tier_type=obj.tier_type
+            ).exclude(id=obj.id if change else None)
+
+            if obj.tier_type == 'pallet':
                 if existing_tiers.exists():
-                    messages.error(request, f"A {obj.tier_type} pricing tier already exists for this product variant.")
+                    messages.error(request, "Only one pallet pricing tier is allowed per product variant.")
                     return
-                if obj.range_start != 1:
-                    messages.error(request, "The pricing tier must start from 1.")
+            elif obj.tier_type == 'pack':
+                # Check if a tier with range_start=1 exists
+                has_first_tier = any(tier.range_start == 1 for tier in existing_tiers)
+                if not has_first_tier and obj.range_start != 1:
+                    messages.error(request, "The first pack pricing tier must start from 1.")
                     return
+                # Validate sequential ranges
+                all_tiers = list(existing_tiers) + [obj]
+                all_tiers.sort(key=lambda x: x.range_start)
+                for i in range(len(all_tiers) - 1):
+                    current = all_tiers[i]
+                    next_tier = all_tiers[i + 1]
+                    current_end = float('inf') if current.no_end_range else (current.range_end if current.range_end is not None else float('inf'))
+                    next_end = float('inf') if next_tier.no_end_range else (next_tier.range_end if next_tier.range_end is not None else float('inf'))
+                    if current.range_start <= next_end and current_end >= next_tier.range_start:
+                        messages.error(request, (
+                            f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} overlaps with "
+                            f"range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {obj.tier_type}."
+                        ))
+                        return
+                    if not current.no_end_range:
+                        current_end = current.range_end if current.range_end is not None else float('inf')
+                        if next_tier.range_start != current_end + 1:
+                            messages.error(request, (
+                                f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} creates a gap or is not sequential "
+                                f"with range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {obj.tier_type}. "
+                                "Ensure ranges are sequential with no gaps."
+                            ))
+                            return
+                for i in range(len(all_tiers) - 1):
+                    current = all_tiers[i]
+                    if current.no_end_range:
+                        next_tier = all_tiers[i + 1]
+                        messages.error(request, (
+                            f"A tier with 'No End Range' checked must be the last tier. Cannot add {next_tier.range_start}-"
+                            f"{'+' if next_tier.no_end_range else next_tier.range_end} after {current.range_start}+ for {obj.tier_type}."
+                        ))
+                        return
+
             obj.full_clean()
             obj.save()
         except ValidationError as e:
@@ -225,6 +265,7 @@ class PricingTierAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
 
 class ProductVariantForm(forms.ModelForm):
     class Meta:
@@ -280,7 +321,7 @@ class TableFieldInline(admin.TabularInline):
         }
 
 class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'units_per_pallet', 'created_at')
+    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'created_at')
     search_fields = ('name', 'product__name')
     list_filter = ('status', 'show_units_per', 'created_at')
     ordering = ('product', 'name')
@@ -295,9 +336,9 @@ class ProductVariantAdmin(admin.ModelAdmin):
             'description': 'Core variant details.'
         }),
         ('Unit Details', {
-            'fields': ('show_units_per', 'units_per_pack', 'units_per_pallet'),
+            'fields': ('show_units_per', 'units_per_pack'),
             'classes': ('inline-group',),
-            'description': 'Specify unit configuration for packs and pallets.'
+            'description': 'Specify unit configuration for packs.'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -313,6 +354,11 @@ class ProductVariantAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         try:
+            if not form.is_valid():
+                for field, errors in form.errors.items():
+                    for error in errors:
+                        messages.error(request, f"{field}: {error}")
+                return
             obj.full_clean()
             obj.save()
         except ValidationError as e:
@@ -323,56 +369,22 @@ class ProductVariantAdmin(admin.ModelAdmin):
 
     def save_related(self, request, form, formsets, change):
         try:
+            if not form.is_valid():
+                for field, errors in form.errors.items():
+                    for error in errors:
+                        messages.error(request, f"{field}: {error}")
+                return
             super().save_related(request, form, formsets, change)
             obj = form.instance
             if obj.pk:
+                # Update status based on pricing tier conditions
                 pricing_tiers = obj.pricing_tiers.all()
-                pack_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pack']
-                pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
-
-                # Validate single tier and show_units_per
-                if obj.show_units_per == 'pack':
-                    if len(pack_tiers) > 1:
-                        messages.error(request, "Only one 'pack' pricing tier is allowed.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                    if pallet_tiers:
-                        messages.error(request, "Pallet pricing tiers are not allowed when show_units_per is 'Pack'.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                    if pack_tiers and pack_tiers[0].range_start != 1:
-                        messages.error(request, "The 'pack' pricing tier must start from 1.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                elif obj.show_units_per == 'both':
-                    if len(pack_tiers) > 1:
-                        messages.error(request, "Only one 'pack' pricing tier is allowed.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                    if len(pallet_tiers) > 1:
-                        messages.error(request, "Only one 'pallet' pricing tier is allowed.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                    if pack_tiers and pack_tiers[0].range_start != 1:
-                        messages.error(request, "The 'pack' pricing tier must start from 1.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
-                    if pallet_tiers and pallet_tiers[0].range_start != 1:
-                        messages.error(request, "The 'pallet' pricing tier must start from 1.")
-                        obj.status = 'draft'
-                        obj.save()
-                        return
+                if pricing_tiers.exists():
+                    # Use the first tier to check conditions, as all tiers share the same product_variant
+                    obj.status = 'active' if pricing_tiers[0].check_pricing_tiers_conditions() else 'draft'
                 else:
-                    messages.error(request, f"Invalid show_units_per value: {obj.show_units_per}")
                     obj.status = 'draft'
-                    obj.save()
-                    return
+                obj.save()
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
@@ -399,6 +411,7 @@ class PricingTierDataInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
+
 class PricingTierDataAdmin(admin.ModelAdmin):
     list_display = ('item', 'pricing_tier', 'price', 'created_at')
     search_fields = ('item__sku', 'pricing_tier__product_variant__name')
@@ -421,13 +434,13 @@ class PricingTierDataAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         try:
+            obj.full_clean()
             obj.save()
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
-
+            return
 
     class Media:
         css = {
@@ -488,6 +501,11 @@ class ItemForm(forms.ModelForm):
     def clean(self):
         cleaned_data = super().clean()
         product_variant = cleaned_data.get('product_variant')
+
+        # if self.instance and self.instance.product_variant and self.instance.product_variant.show_units_per == 'both':
+            # self.fields['is_physical_product'].initial = True
+            # self.fields['is_physical_product'].disabled = True
+
         if not product_variant:
             raise ValidationError({
                 'product_variant': ["Please select a product variant for the item."]
@@ -497,6 +515,12 @@ class ItemForm(forms.ModelForm):
         else:
             cleaned_data['status'] = 'draft'
         return cleaned_data
+    
+    # def __init__(self, *args, **kwargs):
+    #     super().__init__(*args, **kwargs)
+    #     if self.instance and self.instance.product_variant and self.instance.product_variant.show_units_per == 'both':
+    #         self.fields['is_physical_product'].initial = True
+    #         self.fields['is_physical_product'].disabled = True
 
 class ItemImageInline(admin.TabularInline):
     model = ItemImage
@@ -521,6 +545,7 @@ class ItemDataInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
+
 class ItemAdmin(admin.ModelAdmin):
     list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at')
     search_fields = ('sku', 'product_variant__name')
@@ -538,7 +563,7 @@ class ItemAdmin(admin.ModelAdmin):
         ('Physical Product Details', {
             'fields': ('is_physical_product', 'weight', 'weight_unit'),
             'classes': ('inline-group',),
-            'description': 'Specify details for physical products.'
+            'description': 'Specify details for physical products. Must be checked if product variant show units per is "both".'
         }),
         ('Inventory Management', {
             'fields': ('track_inventory', 'stock'),
@@ -565,18 +590,24 @@ class ItemAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         try:
             if not form.is_valid():
-                return  # Form validation will handle errors
+                for field, errors in form.errors.items():
+                    for error in errors:
+                        messages.error(request, f"{field}: {error}")
+                return
+            if obj.product_variant.show_units_per == 'both' and not obj.is_physical_product:
+                messages.error(request, "Item must be a physical product when product variant show units per is set to 'both'.")
+                return
             obj.save()
         except ValidationError as e:
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+            return
 
     def save_related(self, request, form, formsets, change):
         try:
             if not form.is_valid():
-                return  # Ensure form is valid before saving related
+                return
             super().save_related(request, form, formsets, change)
             obj = form.instance
             pricing_tiers = obj.product_variant.pricing_tiers.all()
@@ -590,7 +621,7 @@ class ItemAdmin(admin.ModelAdmin):
             for field, errors in e.error_dict.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
+            return
 
     class Media:
         css = {
