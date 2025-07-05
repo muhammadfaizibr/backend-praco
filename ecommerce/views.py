@@ -139,6 +139,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             }
         return context
 
+
 class ProductVariantViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = ProductVariant.objects.filter(status="active").select_related('product').prefetch_related('pricing_tiers__pricing_data')
@@ -162,8 +163,15 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
         if units <= 0:
             return Response({"error": "Units must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
 
-        units_per_pack = pv.units_per_pack
-        units_per_pallet = pv.units_per_pallet
+        try:
+            item = pv.items.first()
+            if not item:
+                return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
+            units_per_pack = item.units_per_pack or 1
+        except Item.DoesNotExist:
+            return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
+
+        units_per_pallet = units_per_pack  # Assuming pallet logic remains the same
         show_units_per = pv.show_units_per
 
         packs = 0
@@ -178,13 +186,6 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
             remaining_units = units % units_per_pallet
             if remaining_units > 0:
                 pallets += 1
-
-        try:
-            item = pv.items.first()
-            if not item:
-                return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
-        except Item.DoesNotExist:
-            return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
 
         total = Decimal('0.00')
         if show_units_per in ['pack', 'both'] and price_per == 'pack':
@@ -390,7 +391,7 @@ class ItemViewSet(viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context.update({'request': self.request})
         return context
-    
+     
 class ItemDataViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = ItemData.objects.all().select_related('item__product_variant', 'field')
@@ -453,10 +454,8 @@ class CartViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class CartItemViewSet(viewsets.ModelViewSet):
-    renderer_classes = [CustomRenderer]
     queryset = CartItem.objects.all()
     permission_classes = [IsAuthenticated]
-    pagination_class = StandardResultsSetPagination
 
     def get_serializer_class(self):
         if self.action in ['list', 'retrieve']:
@@ -466,27 +465,32 @@ class CartItemViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             raise PermissionDenied("Authentication required to add cart items.")
+        
         try:
             cart, created = Cart.get_or_create_cart(request.user)
             data = request.data.copy() if isinstance(request.data, dict) else request.data
+            
             if isinstance(data, list):
                 responses = []
                 with transaction.atomic():
                     for item_data in data:
                         item_data['cart'] = cart.id
                         responses.append(self._process_cart_item(item_data, cart))
+                    cart.update_pricing_tiers()
                 return Response(responses, status=status.HTTP_200_OK)
             else:
                 data['cart'] = cart.id
                 response = self._process_cart_item(data, cart)
+                cart.update_pricing_tiers()
                 return Response(response, status=status.HTTP_200_OK)
         except ValidationError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def _process_cart_item(self, data, cart):
         item_id = data.get('item')
         pricing_tier_id = data.get('pricing_tier')
         pack_quantity = data.get('pack_quantity', 1)
+        unit_type = data.get('unit_type', 'pack')
         user_exclusive_price_id = data.get('user_exclusive_price')
 
         if not item_id:
@@ -498,20 +502,18 @@ class CartItemViewSet(viewsets.ModelViewSet):
         existing_cart_item = CartItem.objects.filter(
             cart=cart,
             item=item,
+            unit_type=unit_type
         ).first()
 
         serializer_context = {'request': self.request}
         if existing_cart_item:
             existing_cart_item.pack_quantity = pack_quantity
             existing_cart_item.pricing_tier = pricing_tier
-            if user_exclusive_price_id:
-                existing_cart_item.user_exclusive_price = UserExclusivePrice.objects.filter(
-                    id=user_exclusive_price_id,
-                    user=cart.user,
-                    item=item
-                ).first()
-            else:
-                existing_cart_item.user_exclusive_price = None
+            existing_cart_item.user_exclusive_price = UserExclusivePrice.objects.filter(
+                id=user_exclusive_price_id,
+                user=cart.user,
+                item=item
+            ).first() if user_exclusive_price_id else None
             existing_cart_item.full_clean()
             existing_cart_item.save()
             serializer = CartItemDetailSerializer(existing_cart_item, context=serializer_context)
@@ -521,7 +523,7 @@ class CartItemViewSet(viewsets.ModelViewSet):
                 'item': item,
                 'pricing_tier': pricing_tier,
                 'pack_quantity': pack_quantity,
-                'unit_type': 'pack',
+                'unit_type': unit_type,
                 'user_exclusive_price': UserExclusivePrice.objects.filter(
                     id=user_exclusive_price_id,
                     user=cart.user,
@@ -536,15 +538,15 @@ class CartItemViewSet(viewsets.ModelViewSet):
         return serializer.data
 
     def update(self, request, *args, **kwargs):
-        pk = kwargs.get('pk')
         try:
-            instance = self.get_queryset().get(pk=pk)
+            instance = self.get_object()
         except CartItem.DoesNotExist:
             return Response({"detail": "Cart item not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if instance.item is None:
             instance.delete()
-            return Response({"detail": "Cart item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
+            return Response({"detail": "Cart item has no associated item and has been deleted."}, 
+                          status=status.HTTP_410_GONE)
 
         request_data = request.data.copy()
         if 'item' in request_data:
@@ -552,20 +554,15 @@ class CartItemViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(instance, data=request_data, partial=True)
         serializer.is_valid(raise_exception=True)
-        validated_data = serializer.validated_data
-
-        instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
-        instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
-        instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
-
+        
         try:
-            instance.full_clean()
-            instance.save()
+            with transaction.atomic():
+                instance = serializer.save()
+                instance.cart.update_pricing_tiers()
+                response_serializer = CartItemDetailSerializer(instance, context={'request': request})
+                return Response(response_serializer.data, status=status.HTTP_200_OK)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-        response_serializer = CartItemDetailSerializer(instance, context={'request': request})
-        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
     def retrieve(self, request, *args, **kwargs):
         try:
@@ -575,7 +572,8 @@ class CartItemViewSet(viewsets.ModelViewSet):
 
         if instance.item is None:
             instance.delete()
-            return Response({"detail": "Cart item has no associated item and has been deleted."}, status=status.HTTP_410_GONE)
+            return Response({"detail": "Cart item has no associated item and has been deleted."}, 
+                          status=status.HTTP_410_GONE)
 
         serializer = self.get_serializer(instance)
         return Response(serializer.data)

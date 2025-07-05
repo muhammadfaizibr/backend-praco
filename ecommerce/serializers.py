@@ -131,17 +131,12 @@ class ProductVariantSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductVariant
         fields = [
-            'id', 'product', 'name', 'units_per_pack',
+            'id', 'product', 'name',
             'show_units_per', 'created_at', 'pricing_tiers'
         ]
 
     def validate(self, data):
         show_units_per = data.get('show_units_per')
-        units_per_pack = data.get('units_per_pack', 6)
-
-        # Validate units configuration
-        if show_units_per == 'both' and units_per_pack <= 0:
-            raise serializers.ValidationError("Units per pack must be a positive number when show_units_per is 'Both'.")
 
         # Validate pricing tiers if instance exists
         if self.instance and self.instance.pk:
@@ -253,8 +248,6 @@ class ItemDataSerializer(serializers.ModelSerializer):
         data['value_number'] = value_number
         data['value_image'] = value_image
         return data
-
-
 class ItemSerializer(serializers.ModelSerializer):
     images = ItemImageSerializer(many=True, read_only=True)
     pricing_tier_data = PricingTierDataSerializer(many=True, read_only=True)
@@ -266,7 +259,8 @@ class ItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'product_variant', 'sku', 'is_physical_product', 'weight', 'weight_unit',
             'track_inventory', 'stock', 'title', 'status', 'created_at', 'images',
-            'pricing_tier_data', 'data_entries', 'height', 'width', 'length', 'measurement_unit'
+            'pricing_tier_data', 'data_entries', 'height', 'width', 'length', 'measurement_unit',
+            'units_per_pack'
         ]
 
     def validate(self, data):
@@ -280,6 +274,7 @@ class ItemSerializer(serializers.ModelSerializer):
         width = data.get('width')
         length = data.get('length')
         measurement_unit = data.get('measurement_unit')
+        units_per_pack = data.get('units_per_pack')
 
         product_variant = data.get('product_variant')
         if not product_variant and self.instance:
@@ -287,6 +282,10 @@ class ItemSerializer(serializers.ModelSerializer):
 
         if product_variant and product_variant.show_units_per == 'both' and not is_physical_product:
             raise serializers.ValidationError("Item must be a physical product when product variant show units per is set to 'both'.")
+
+        # Validate units_per_pack
+        if units_per_pack is None or units_per_pack <= 0:
+            raise serializers.ValidationError("Units per pack must be provided and greater than 0.")
 
         required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
         category_name = ''
@@ -335,6 +334,7 @@ class UserExclusivePriceSerializer(serializers.ModelSerializer):
         model = UserExclusivePrice
         fields = ['id', 'user', 'item', 'discount_percentage', 'created_at']
 
+
 class CartItemSerializer(serializers.ModelSerializer):
     cart = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
     item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
@@ -342,11 +342,17 @@ class CartItemSerializer(serializers.ModelSerializer):
     user_exclusive_price = serializers.PrimaryKeyRelatedField(
         queryset=UserExclusivePrice.objects.all(), required=False, allow_null=True
     )
+    total_weight_kg = serializers.SerializerMethodField()
+    unit_type = serializers.CharField(default='pack')
 
     class Meta:
         model = CartItem
-        fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
-        read_only_fields = ['created_at', 'unit_type']
+        fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 
+                 'user_exclusive_price', 'created_at', 'total_weight_kg']
+        read_only_fields = ['created_at', 'total_weight_kg']
+
+    def get_total_weight_kg(self, obj):
+        return obj.total_weight_kg
 
     def validate(self, data):
         instance_data = {
@@ -369,47 +375,14 @@ class CartItemSerializer(serializers.ModelSerializer):
             if instance.cart and instance.user_exclusive_price.user != instance.cart.user:
                 raise serializers.ValidationError("User exclusive price must correspond to the cart's user.")
 
+        if 'user_exclusive_price' in data and data['user_exclusive_price']:
+            user_exclusive_price = data['user_exclusive_price']
+            if not isinstance(user_exclusive_price, (int, str)):
+                raise serializers.ValidationError({
+                    'user_exclusive_price': 'Expected ID, got object'
+                })
+
         return data
-
-    def get_price_per_unit(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        return pricing_data.price if pricing_data else Decimal('0.00')
-
-    def get_price_per_pack(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
-        return Decimal('0.00')
-
-    def get_subtotal(self, obj):
-        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
-            per_pack_price = pricing_data.price * Decimal(units_per_pack)
-            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        return Decimal('0.00')
-
-    def get_total(self, obj):
-        subtotal = self.get_subtotal(obj)
-        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
-        discount = discount_percentage / Decimal('100.00')
-        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
-    def get_weight(self, obj):
-        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
-        total_units = obj.total_units
-        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-
-    def to_representation(self, instance):
-        representation = super().to_representation(instance)
-        representation.update({
-            'price_per_unit': self.get_price_per_unit(instance),
-            'price_per_pack': self.get_price_per_pack(instance),
-            'subtotal': self.get_subtotal(instance),
-            'total': self.get_total(instance),
-            'weight': self.get_weight(instance),
-        })
-        return representation
 
     def create(self, validated_data):
         cart = validated_data.get('cart')
@@ -419,6 +392,21 @@ class CartItemSerializer(serializers.ModelSerializer):
         unit_type = validated_data.get('unit_type', 'pack')
         user_exclusive_price = validated_data.get('user_exclusive_price')
 
+        existing_cart_item = CartItem.objects.filter(
+            cart=cart,
+            item=item,
+            unit_type=unit_type
+        ).first()
+
+        if existing_cart_item:
+            existing_cart_item.pack_quantity = pack_quantity
+            existing_cart_item.pricing_tier = pricing_tier
+            existing_cart_item.user_exclusive_price = user_exclusive_price
+            existing_cart_item.full_clean()
+            existing_cart_item.save()
+            existing_cart_item.cart.update_pricing_tiers()
+            return existing_cart_item
+        
         cart_item = CartItem(
             cart=cart,
             item=item,
@@ -429,17 +417,18 @@ class CartItemSerializer(serializers.ModelSerializer):
         )
         cart_item.full_clean()
         cart_item.save()
+        cart_item.cart.update_pricing_tiers()
         return cart_item
 
     def update(self, instance, validated_data):
-        # Do not allow updating the item field
         instance.pack_quantity = validated_data.get('pack_quantity', instance.pack_quantity)
         instance.pricing_tier = validated_data.get('pricing_tier', instance.pricing_tier)
         instance.user_exclusive_price = validated_data.get('user_exclusive_price', instance.user_exclusive_price)
+        instance.unit_type = validated_data.get('unit_type', instance.unit_type)
         instance.full_clean()
         instance.save()
+        instance.cart.update_pricing_tiers()
         return instance
-
 
 class CartItemDetailSerializer(serializers.ModelSerializer):
     item = ItemSerializer(read_only=True)  # Explicitly define the item field to use ItemSerializer
@@ -447,7 +436,7 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = CartItem
         fields = ['id', 'cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
-        # Removed depth=4 since we're explicitly defining nested serializers
+        read_only_fields = ['created_at', 'unit_type']
 
     def get_discount_percentage(self, obj):
         return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
@@ -458,14 +447,14 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
 
     def get_price_per_pack(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
         return Decimal('0.00')
 
     def get_subtotal(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
             per_pack_price = pricing_data.price * Decimal(units_per_pack)
             return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return Decimal('0.00')
@@ -493,6 +482,7 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
         })
         return representation
 
+
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemDetailSerializer(many=True, read_only=True)
 
@@ -518,7 +508,6 @@ class CartSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         if not isinstance(instance, Cart):
-            print(f"Unexpected instance type in CartSerializer: {type(instance)}, value: {instance}")
             return {
                 'id': None,
                 'user': None,
@@ -544,6 +533,37 @@ class CartSerializer(serializers.ModelSerializer):
         })
         return representation
 
+    def update(self, instance, validated_data):
+        items_data = validated_data.pop('items', [])
+        existing_items = {
+            (item.item_id, item.unit_type): item 
+            for item in instance.items.all()
+        }
+        
+        with transaction.atomic():
+            for item_data in items_data:
+                key = (
+                    item_data['item'].id,
+                    item_data.get('unit_type', 'pack')
+                )
+                
+                if key in existing_items:
+                    existing_item = existing_items[key]
+                    existing_item.pack_quantity = item_data['pack_quantity']
+                    existing_item.pricing_tier = item_data['pricing_tier']
+                    existing_item.user_exclusive_price = item_data.get(
+                        'user_exclusive_price',
+                        existing_item.user_exclusive_price
+                    )
+                    existing_item.full_clean()
+                    existing_item.save()
+                else:
+                    CartItem.objects.create(cart=instance, **item_data)
+            
+            instance.update_pricing_tiers()
+        
+        return instance
+    
 class OrderItemSerializer(serializers.ModelSerializer):
     order = serializers.PrimaryKeyRelatedField(queryset=Order.objects.all())
     item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
@@ -586,14 +606,14 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
     def get_price_per_pack(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
         return Decimal('0.00')
 
     def get_subtotal(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
             per_pack_price = pricing_data.price * Decimal(units_per_pack)
             return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return Decimal('0.00')
@@ -666,6 +686,7 @@ class OrderItemDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
         fields = ['id', 'order', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 'created_at']
+        read_only_fields = ['created_at', 'unit_type']
 
     def get_item(self, obj):
         from ecommerce.serializers import ItemSerializer
@@ -677,14 +698,14 @@ class OrderItemDetailSerializer(serializers.ModelSerializer):
 
     def get_price_per_pack(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
         return Decimal('0.00')
 
     def get_subtotal(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
             per_pack_price = pricing_data.price * Decimal(units_per_pack)
             return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return Decimal('0.00')
@@ -849,7 +870,6 @@ class OrderSerializer(serializers.ModelSerializer):
             logger.info(f"PDFs and receipts generated for order {order.id}")
 
             return order
-
 
     def update(self, instance, validated_data):
         logger.info(f"Updating order {instance.id} with validated data: {validated_data}")

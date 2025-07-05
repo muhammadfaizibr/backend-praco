@@ -23,6 +23,8 @@ from datetime import timedelta
 from io import BytesIO
 from phonenumber_field.modelfields import PhoneNumberField
 from backend_praco.utils import send_email
+import math
+from django.db.models import Sum 
 
 class Category(models.Model):
     """
@@ -152,7 +154,7 @@ class ProductVariant(models.Model):
 
     product = models.ForeignKey('Product', on_delete=models.CASCADE, related_name='product_variants')
     name = models.CharField(max_length=255)
-    units_per_pack = models.PositiveIntegerField(default=6, help_text="Number of units per pack")
+    # units_per_pack = models.PositiveIntegerField(default=6, help_text="Number of units per pack")
     show_units_per = models.CharField(max_length=10, choices=SHOW_UNITS_PER_CHOICES, default='pack')
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='draft', editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -171,8 +173,8 @@ class ProductVariant(models.Model):
             errors['product'] = "Please select a product for the variant."
         elif not self.name:
             errors['name'] = "Variant name is required."
-        elif self.units_per_pack <= 0:
-            errors['units_per_pack'] = "Units per pack must be a positive number."
+        # elif self.units_per_pack <= 0:
+            # errors['units_per_pack'] = "Units per pack must be a positive number."
 
         if errors:
             raise ValidationError(errors)
@@ -293,6 +295,35 @@ class PricingTier(models.Model):
 
         if errors:
             raise ValidationError(errors)
+
+    @classmethod
+    def get_appropriate_tier(cls, product_variant, quantity, tier_type='pack'):
+        """
+        Find the best pricing tier for a given quantity and tier type.
+        Returns the most appropriate pricing tier based on the quantity.
+        """
+        tiers = cls.objects.filter(
+            product_variant=product_variant,
+            tier_type=tier_type
+        ).order_by('range_start')
+
+        if not tiers.exists():
+            return None
+
+        # For pallet tiers, just return the single pallet tier
+        if tier_type == 'pallet':
+            return tiers.first()
+
+        # For pack tiers, find the best matching tier
+        for tier in tiers:
+            if quantity >= tier.range_start and (
+                tier.no_end_range or (tier.range_end and quantity <= tier.range_end)
+            ):
+                return tier
+
+        # If no exact match found, return the highest tier that's below the quantity
+        # This is useful when quantity exceeds all tier ranges
+        return tiers.last()
 
     def check_pricing_tiers_conditions(self):
         """
@@ -468,8 +499,6 @@ class TableField(models.Model):
 
     def __str__(self):
         return f"{self.product_variant.name} - {self.name} ({self.field_type}, {'Long' if self.long_field else 'Short'})"
-
-
 class Item(models.Model):
     """
     Represents a specific item within a product variant with attributes like SKU, stock, and dimensions.
@@ -529,6 +558,7 @@ class Item(models.Model):
         editable=False, 
         help_text="Length converted to inches (automatically calculated)."
     )
+    units_per_pack = models.PositiveIntegerField(validators=[MinValueValidator(1)], default=1)
 
     class Meta:
         indexes = [
@@ -605,7 +635,7 @@ class Item(models.Model):
             else:
                 # Only clear dimensions if they are not provided or invalid
                 if not all([self.height, self.width, self.length, self.measurement_unit]) or \
-                any([self.height is not None and self.height <= 0,
+                   any([self.height is not None and self.height <= 0,
                         self.width is not None and self.width <= 0,
                         self.length is not None and self.length <= 0,
                         self.measurement_unit and self.measurement_unit not in ['MM', 'CM', 'IN', 'M']]):
@@ -646,14 +676,15 @@ class Item(models.Model):
                     errors['stock'] = "Stock must be a non-negative number when tracking inventory."
                 if not self.title:
                     errors['title'] = "Title is required when tracking inventory."
-                # Validate that stock is a multiple of product_variant.units_per_pack
-                if self.product_variant and self.stock is not None:
-                    units_per_pack = self.product_variant.units_per_pack
-                    if units_per_pack > 0 and self.stock % units_per_pack != 0:
-                        errors['stock'] = f"Stock must be a multiple of the product variant's units per pack ({units_per_pack}). Current stock: {self.stock}."
+                # Validate that stock is a multiple of units_per_pack
+                if self.stock is not None and self.units_per_pack > 0 and self.stock % self.units_per_pack != 0:
+                    errors['stock'] = f"Stock must be a multiple of units per pack ({self.units_per_pack}). Current stock: {self.stock}."
             else:
                 self.stock = None
                 # self.title = None
+
+            if self.units_per_pack <= 0:
+                errors['units_per_pack'] = "Units per pack must be a positive number."
 
             if errors:
                 raise ValidationError(errors)
@@ -698,7 +729,6 @@ class Item(models.Model):
 
     def __str__(self):
         return f"Item {self.sku} for {self.product_variant.name} ({self.status})"
-
 
 class ItemImage(models.Model):
     """
@@ -832,20 +862,20 @@ class UserExclusivePrice(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.item} ({self.discount_percentage}% off)"
 
+
 class CartItem(models.Model):
     cart = models.ForeignKey('Cart', on_delete=models.CASCADE, related_name='items')
     item = models.ForeignKey('Item', on_delete=models.PROTECT, related_name='cart_items')
     pricing_tier = models.ForeignKey('PricingTier', on_delete=models.PROTECT, related_name='cart_items')
-    pack_quantity = models.PositiveIntegerField()  # Renamed from quantity
+    pack_quantity = models.PositiveIntegerField()
     unit_type = models.CharField(
         max_length=10,
-        choices=(('pack', 'Pack'),),
+        choices=(('pack', 'Pack'), ('pallet', 'Pallet')),
         default='pack',
-        editable=False,  # Non-editable, fixed to 'pack'
-        help_text="Unit type is fixed to 'pack'."
+        help_text="Unit type for this cart item."
     )
     user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True,
-                                            related_name='cartitem_items')
+                                          related_name='cartitem_items')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -855,7 +885,7 @@ class CartItem(models.Model):
             models.Index(fields=['pricing_tier']),
             models.Index(fields=['created_at']),
         ]
-        unique_together = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 'updated_at')
+        unique_together = ('cart', 'item', 'pricing_tier', 'unit_type')
         verbose_name = 'cart item'
         verbose_name_plural = 'cart items'
 
@@ -864,36 +894,52 @@ class CartItem(models.Model):
             return Decimal('0.00')
         weight = Decimal(str(weight))
         if weight_unit == 'lb':
-            return (weight * Decimal('0.453592'))
+            return (weight * Decimal('0.453592')).quantize(Decimal('0.01'))
         elif weight_unit == 'oz':
-            return (weight * Decimal('0.0283495'))
+            return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'))
         elif weight_unit == 'g':
-            return (weight * Decimal('0.001'))
+            return (weight * Decimal('0.001')).quantize(Decimal('0.01'))
         elif weight_unit == 'kg':
-            return weight
+            return weight.quantize(Decimal('0.01'))
         return Decimal('0.00')
 
     @property
     def total_units(self):
-        if not self.item or not self.item.product_variant:
+        if not self.item:
             return 0
-        units_per_pack = self.item.product_variant.units_per_pack
+        units_per_pack = self.item.units_per_pack or 1
         return self.pack_quantity * units_per_pack
+
+    @property
+    def total_weight_kg(self):
+        if not self.item:
+            return Decimal('0.00')
+        item_weight_kg = self.convert_weight_to_kg(self.item.weight, self.item.weight_unit)
+        return (item_weight_kg * Decimal(self.total_units)).quantize(Decimal('0.01'))
+
+    def get_appropriate_pricing_tier(self):
+        from .models import PricingTier
+        quantity = self.pack_quantity
+        return PricingTier.get_appropriate_tier(
+            product_variant=self.item.product_variant,
+            quantity=quantity,
+            tier_type=self.unit_type
+        )
 
     def clean(self):
         errors = {}
+        
         if not self.item:
-            errors['item'] = "Please select an item for this cart entry."
-        elif not self.pricing_tier:
+            errors['item'] = "Please select an item forokay this cart entry."
+        if not self.pricing_tier:
             errors['pricing_tier'] = "Please select a pricing tier for this cart entry."
-        elif self.pack_quantity <= 0:
+        if self.pack_quantity <= 0:
             errors['pack_quantity'] = "Pack quantity must be a positive number."
 
         if self.item and self.pricing_tier:
             if self.pricing_tier.product_variant != self.item.product_variant:
                 errors['pricing_tier'] = "Pricing tier must belong to the same product variant as the item."
 
-            units_per_pack = self.item.product_variant.units_per_pack
             if self.pack_quantity < self.pricing_tier.range_start:
                 errors['pack_quantity'] = (
                     f"Pack quantity {self.pack_quantity} is below the pricing tier range "
@@ -905,21 +951,34 @@ class CartItem(models.Model):
                     f"{self.pricing_tier.range_start}-{self.pricing_tier.range_end}."
                 )
 
-            pricing_data = PricingTierData.objects.filter(pricing_tier=self.pricing_tier, item=self.item).first()
-            if not pricing_data:
-                errors['pricing_tier'] = "No pricing data found for this item and pricing tier."
-
-        if self.item and self.item.track_inventory:
-            total_units = self.total_units
-            if self.item.stock is None or total_units > self.item.stock:
-                errors['pack_quantity'] = (
-                    f"Insufficient stock for {self.item.sku}. Available: {self.item.stock or 0} units, Required: {total_units} units."
-                )
+            if self.item.track_inventory:
+                total_units = self.total_units
+                available_stock = self.item.stock
+                
+                units_per_pack = self.item.units_per_pack or 1
+                
+                existing_cart_units = CartItem.objects.filter(
+                    cart=self.cart,
+                    item=self.item
+                ).exclude(pk=self.pk).aggregate(
+                    total=Sum('pack_quantity') * units_per_pack
+                )['total'] or 0
+                
+                available_for_new = max(0, available_stock - existing_cart_units)
+                
+                if available_stock is None or total_units > available_stock:
+                    errors['pack_quantity'] = (
+                        f"Insufficient stock for {self.item.sku}. "
+                        f"Total available: {available_stock or 0} units, "
+                        f"Already in cart: {existing_cart_units} units, "
+                        f"Available for this addition: {available_for_new} units, "
+                        f"Requested: {total_units} units."
+                    )
 
         if self.user_exclusive_price:
-            if self.user_exclusive_price.item != self.item:
+            if self.item and self.user_exclusive_price.item != self.item:
                 errors['user_exclusive_price'] = "User exclusive price must correspond to the selected item."
-            elif self.user_exclusive_price.user != self.cart.user:
+            if self.cart and self.user_exclusive_price.user != self.cart.user:
                 errors['user_exclusive_price'] = "User exclusive price must correspond to the cart's user."
 
         if errors:
@@ -927,42 +986,37 @@ class CartItem(models.Model):
 
     def save(self, *args, **kwargs):
         from django.db import transaction
-        # Enforce that item is not None even if full_clean is bypassed
+        
         if not self.item:
             raise ValidationError({"item": "CartItem cannot be saved without an item."})
 
         with transaction.atomic():
-            # Check for existing CartItem with the same cart and item
             existing_cart_item = CartItem.objects.filter(
                 cart=self.cart,
                 item=self.item,
+                unit_type=self.unit_type
             ).exclude(pk=self.pk).first()
 
             if existing_cart_item:
-                # Replace the existing CartItem's data with new values
                 existing_cart_item.pack_quantity = self.pack_quantity
                 existing_cart_item.pricing_tier = self.pricing_tier
                 existing_cart_item.user_exclusive_price = self.user_exclusive_price
-                existing_cart_item.unit_type = self.unit_type
                 existing_cart_item.full_clean()
                 existing_cart_item.save(*args, **kwargs)
-                # Update the cart
-                try:
-                    self.cart.update_cart()
-                except Exception:
-                    pass
-                # Set the current instance's pk to the existing one to prevent saving a new record
                 self.pk = existing_cart_item.pk
-                return existing_cart_item
+                cart_item = existing_cart_item
             else:
-                # Proceed with saving new or updating existing CartItem
                 self.full_clean()
                 super().save(*args, **kwargs)
-                try:
-                    self.cart.update_cart()
-                except Exception:
-                    pass
-                return self
+                cart_item = self
+
+            try:
+                self.cart.update_cart()
+                self.cart.update_pricing_tiers()
+            except Exception:
+                pass
+
+            return cart_item
 
 class Cart(models.Model):
     user = models.OneToOneField(
@@ -996,20 +1050,46 @@ class Cart(models.Model):
 
     @classmethod
     def get_or_create_cart(cls, user):
-        """Retrieve an existing cart for the user or create a new one."""
         cart, created = cls.objects.get_or_create(user=user)
         return cart, created
 
+    def add_or_update_item(self, item_data):
+        item_id = item_data['item'].id
+        pricing_tier = item_data.get('pricing_tier')
+        unit_type = item_data.get('unit_type', 'pack')
+        pack_quantity = item_data.get('pack_quantity', 0)
+        
+        existing_item = self.items.filter(
+            item_id=item_id,
+            unit_type=unit_type
+        ).first()
+        
+        if existing_item:
+            existing_item.pack_quantity = pack_quantity
+            existing_item.pricing_tier = pricing_tier
+            existing_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_item.user_exclusive_price)
+            existing_item.full_clean()
+            existing_item.save()
+            self.update_pricing_tiers()
+            return existing_item
+        else:
+            if unit_type == 'pack' and not pricing_tier.no_end_range and pack_quantity > pricing_tier.range_end:
+                raise ValidationError(
+                    f"Pack quantity {pack_quantity} exceeds "
+                    f"the pricing tier range {pricing_tier.range_start}-{pricing_tier.range_end}."
+                )
+            new_item = self.items.create(**item_data)
+            self.update_pricing_tiers()
+            return new_item
+        
     def calculate_subtotal(self):
-        """Calculate the subtotal of all CartItems, applying UserExclusivePrice discounts."""
         total = Decimal('0.00')
         for item in self.items.all():
             pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
-            if pricing_data and item.item.product_variant:
-                units_per_pack = item.item.product_variant.units_per_pack
+            if pricing_data and item.item:
+                units_per_pack = item.item.units_per_pack or 1
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
                 item_subtotal = per_pack_price * Decimal(item.pack_quantity)
-                # Apply UserExclusivePrice discount if available
                 if item.user_exclusive_price:
                     discount_percentage = item.user_exclusive_price.discount_percentage
                     discount = discount_percentage / Decimal('100.00')
@@ -1018,44 +1098,106 @@ class Cart(models.Model):
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total_units_and_packs(self):
-        """Calculate total units and packs across all CartItems."""
         total_units = 0
         total_packs = 0
         for item in self.items.all():
-            units_per_pack = item.item.product_variant.units_per_pack
+            units_per_pack = item.item.units_per_pack or 1
             total_units += item.pack_quantity * units_per_pack
             total_packs += item.pack_quantity
         return total_units, total_packs
 
     def calculate_total_weight(self):
-        """Calculate the total weight of all CartItems."""
         total_weight = Decimal('0.00')
         for item in self.items.all():
-            item_weight_kg = item.convert_weight_to_kg(item.item.weight, item.item.weight_unit)
-            total_units = item.total_units
-            total_weight += item_weight_kg * Decimal(total_units)
+            total_weight += item.total_weight_kg
         return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
     def calculate_total(self):
-        """Calculate the total: Subtotal -> Apply Discount -> Add 20% VAT."""
         subtotal = self.calculate_subtotal()
+        if subtotal > 600:
+            self.discount = Decimal('10.00')
+        else:
+            self.discount = Decimal('0.00')
         discount_amount = (subtotal * self.discount) / Decimal('100.00')
         discounted_subtotal = subtotal - discount_amount
         vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
         total = discounted_subtotal + vat_amount
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     
+    def update_cart(self):
+        self.save()
 
-    # def update_cart(self):
-    #     """Update cart discount based on subtotal with UserExclusivePrice discounts."""
-    #     subtotal = self.calculate_subtotal()
-    #     self.discount = Decimal('10.00') if subtotal > Decimal('600.00') else Decimal('0.00')
-    #     super().save()
+    def update_pricing_tiers(self):
+        from .models import PricingTier
+        total_weight = self.calculate_total_weight()
+        use_pallet_pricing = total_weight >= Decimal('850.00')
 
-    def save(self, *args, **kwargs):
-        if not self.pk:
-            super().save(*args, **kwargs)
-        # self.update_cart()
+        with transaction.atomic():
+            for item in self.items.select_for_update():
+                variant = item.item.product_variant
+                if not variant:
+                    continue
+
+                has_pallet_pricing = variant.pricing_tiers.filter(
+                    tier_type='pallet'
+                ).exists()
+
+                new_pricing_tier = None
+                new_unit_type = item.unit_type
+
+                if use_pallet_pricing and has_pallet_pricing:
+                    pallet_tiers = variant.pricing_tiers.filter(
+                        tier_type='pallet'
+                    ).order_by('range_start')
+                    units_per_pallet = item.item.units_per_pack or 1
+                    pallet_quantity = math.ceil(item.pack_quantity / units_per_pallet)
+
+                    for tier in pallet_tiers:
+                        if pallet_quantity >= tier.range_start and (
+                            tier.no_end_range or pallet_quantity <= tier.range_end
+                        ):
+                            new_pricing_tier = tier
+                            new_unit_type = 'pallet'
+                            break
+                    if not new_pricing_tier:
+                        new_pricing_tier = pallet_tiers.last()
+                        new_unit_type = 'pallet'
+                else:
+                    pack_tiers = variant.pricing_tiers.filter(
+                        tier_type='pack'
+                    ).order_by('range_start')
+
+                    for tier in pack_tiers:
+                        if item.pack_quantity >= tier.range_start and (
+                            tier.no_end_range or item.pack_quantity <= tier.range_end
+                        ):
+                            new_pricing_tier = tier
+                            new_unit_type = 'pack'
+                            break
+                    if not new_pricing_tier:
+                        new_pricing_tier = pack_tiers.last()
+                        new_unit_type = 'pack'
+
+                if new_pricing_tier and (item.pricing_tier != new_pricing_tier or item.unit_type != new_unit_type):
+                    item.pricing_tier = new_pricing_tier
+                    item.unit_type = new_unit_type
+                    item.full_clean()
+                    item.save()
+
+def update_cart_pricing_tiers(sender, instance, **kwargs):
+    """
+    Update pricing tiers when cart items change
+    """
+    if instance.cart:
+        instance.cart.update_pricing_tiers()
+
+@receiver(post_delete, sender=CartItem)
+def update_cart_pricing_tiers_on_delete(sender, instance, **kwargs):
+    """
+    Update pricing tiers when cart items are deleted
+    """
+    if instance.cart:
+        instance.cart.update_pricing_tiers()
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def create_user_cart(sender, instance, created, **kwargs):
@@ -1114,6 +1256,7 @@ class HRFlowable(Flowable):
         self.canv.setLineWidth(self.thickness)
         self.canv.setStrokeColor(self.color)
         self.canv.line(0, 0, self.width, 0)
+
 
 class Order(models.Model):
     STATUS_CHOICES = (
@@ -1280,7 +1423,7 @@ class Order(models.Model):
             total_units = 0
             total_packs = 0
             for item in self.items.all():
-                units_per_pack = item.item.product_variant.units_per_pack if item.item.product_variant else 1
+                units_per_pack = item.item.units_per_pack or 1
                 total_units += item.pack_quantity * units_per_pack
                 total_packs += item.pack_quantity
             logger.info(f"Order {self.id} total units: {total_units}, total packs: {total_packs}")
@@ -1735,14 +1878,13 @@ class Order(models.Model):
             ]))
             elements.append(address_table)
             elements.append(Spacer(1, 0.5*cm))
-            refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_receipt else "N/A"
+            refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_payment_receipt else "N/A"
 
             total_due = self.calculate_total()
             details_data = [
                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
                 [Paragraph("Refund Transaction ID:", bold_style), Paragraph(self.refund_transaction_id or "N/A", normal_style)],
                 [Paragraph("Refund Payment Receipt:", bold_style), Paragraph(f'<a href="{refund_payment_receipt_link}">View Receipt</a>', orange_style)],
-
                 [Paragraph("Total Refund:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
             ]
             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
@@ -2071,7 +2213,7 @@ class OrderItem(models.Model):
     def calculate_weight(self):
         """Calculate the weight per unit."""
         try:
-            if not self.item or not self.item.product_variant:
+            if not self.item:
                 return Decimal('0.00')
             weight = self.item.weight or Decimal('0.00')
             weight_unit = self.item.weight_unit or 'kg'
@@ -2097,14 +2239,13 @@ class OrderItem(models.Model):
                 return Decimal('0.00')
             weight = Decimal(str(weight))
             if weight_unit == 'lb':
-                return (weight * Decimal('0.453592'))
+                return (weight * Decimal('0.453592')).quantize(Decimal('0.01'))
             elif weight_unit == 'oz':
-                return (weight * Decimal('0.0283495'))
+                return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'))
             elif weight_unit == 'g':
-                print(weight, 'weight')
-                return (weight * Decimal('0.001'))
+                return (weight * Decimal('0.001')).quantize(Decimal('0.01'))
             elif weight_unit == 'kg':
-                return weight
+                return weight.quantize(Decimal('0.01'))
             return Decimal('0.00')
         except Exception as e:
             logger.error(f"Error converting weight for order item {self.id}: {str(e)}")
@@ -2114,9 +2255,9 @@ class OrderItem(models.Model):
     def total_units(self):
         """Calculate total units for the item."""
         try:
-            if not self.item or not self.item.product_variant:
+            if not self.item:
                 return 0
-            units_per_pack = self.item.product_variant.units_per_pack
+            units_per_pack = self.item.units_per_pack or 1
             return self.pack_quantity * units_per_pack
         except Exception as e:
             logger.error(f"Error calculating total units for order item {self.id}: {str(e)}")
@@ -2128,8 +2269,8 @@ class OrderItem(models.Model):
             pricing_data = PricingTierData.objects.filter(
                 pricing_tier=self.pricing_tier, item=self.item
             ).first()
-            if pricing_data and self.item.product_variant:
-                units_per_pack = self.item.product_variant.units_per_pack
+            if pricing_data and self.item:
+                units_per_pack = self.item.units_per_pack or 1
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
                 item_subtotal = per_pack_price * Decimal(self.pack_quantity)
                 return item_subtotal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
@@ -2161,12 +2302,10 @@ class OrderItem(models.Model):
             elif self.pack_quantity <= 0:
                 errors['pack_quantity'] = "Pack quantity must be a positive number."
             if self.item and self.pricing_tier:
-                if not hasattr(self.item, 'product_variant') or not self.item.product_variant:
-                    errors['item'] = "Item must have a valid product variant."
-                elif self.pricing_tier.product_variant != self.item.product_variant:
+                if self.pricing_tier.product_variant != self.item.product_variant:
                     errors['pricing_tier'] = "Pricing tier must belong to the same product variant as the item."
                 else:
-                    units_per_pack = self.item.product_variant.units_per_pack
+                    units_per_pack = self.item.units_per_pack or 1
                     if self.pack_quantity < self.pricing_tier.range_start:
                         errors['pack_quantity'] = (
                             f"Pack quantity {self.pack_quantity} is below the pricing tier range "
@@ -2232,7 +2371,6 @@ class OrderItem(models.Model):
         except Exception as e:
             logger.error(f"Error saving order item {self.id}: {str(e)}")
             raise ValidationError({"__all__": "An unexpected error occurred while saving the order item."})
-
 
 # email template
 # testing

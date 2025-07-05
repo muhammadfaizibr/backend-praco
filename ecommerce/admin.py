@@ -13,6 +13,7 @@ from django.core.files.base import ContentFile
 from django.urls import reverse, path
 from django.utils.html import format_html
 from backend_praco.utils import send_email
+from django.db import transaction
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at')
@@ -321,7 +322,7 @@ class TableFieldInline(admin.TabularInline):
         }
 
 class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'product', 'status', 'show_units_per', 'units_per_pack', 'created_at')
+    list_display = ('name', 'product', 'status', 'show_units_per', 'created_at')
     search_fields = ('name', 'product__name')
     list_filter = ('status', 'show_units_per', 'created_at')
     ordering = ('product', 'name')
@@ -336,9 +337,9 @@ class ProductVariantAdmin(admin.ModelAdmin):
             'description': 'Core variant details.'
         }),
         ('Unit Details', {
-            'fields': ('show_units_per', 'units_per_pack'),
+            'fields': ('show_units_per',),
             'classes': ('inline-group',),
-            'description': 'Specify unit configuration for packs.'
+            'description': 'Specify unit display configuration.'
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -545,15 +546,15 @@ class ItemDataInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
-
 class ItemAdmin(admin.ModelAdmin):
-    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'created_at')
+    list_display = ('sku', 'product_variant', 'status', 'is_physical_product', 'track_inventory', 'stock', 'units_per_pack', 'created_at')
     search_fields = ('sku', 'product_variant__name')
     list_filter = ('status', 'is_physical_product', 'track_inventory', 'created_at')
     ordering = ('sku', 'product_variant')
     form = ItemForm
     autocomplete_fields = ['product_variant']
     readonly_fields = ('status', 'created_at', 'height_in_inches', 'width_in_inches', 'length_in_inches')
+    list_editable = ('units_per_pack', 'stock', 'track_inventory')
 
     fieldsets = (
         ('Basic Information', {
@@ -561,7 +562,7 @@ class ItemAdmin(admin.ModelAdmin):
             'description': 'Core item details.'
         }),
         ('Physical Product Details', {
-            'fields': ('is_physical_product', 'weight', 'weight_unit'),
+            'fields': ('is_physical_product', 'weight', 'weight_unit', 'units_per_pack'),
             'classes': ('inline-group',),
             'description': 'Specify details for physical products. Must be checked if product variant show units per is "both".'
         }),
@@ -731,7 +732,6 @@ class UserExclusivePriceAdmin(admin.ModelAdmin):
                     messages.error(request, f"{field}: {error}" if field != '__all__' else error)
             raise
 
-
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
@@ -755,15 +755,15 @@ class CartItemInline(admin.TabularInline):
 
     def get_price_per_pack(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
         return Decimal('0.00')
     get_price_per_pack.short_description = "Price Per Pack"
 
     def get_subtotal(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
             per_pack_price = pricing_data.price * Decimal(units_per_pack)
             return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         return Decimal('0.00')
@@ -787,53 +787,32 @@ class CartItemInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
-class CartItemAdmin(admin.ModelAdmin):
-    search_fields = ('cart__user__email', 'item__sku')
-    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'created_at')
-    list_filter = ('created_at', 'updated_at')
-    readonly_fields = ('created_at', 'updated_at', 'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
-    ordering = ('cart', 'item')
-    autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
-
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('cart', 'item', 'pricing_tier', 'pack_quantity'),
-            'description': 'Core cart item details.'
-        }),
-        ('Pricing Details', {
-            'fields': ('get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
-            'classes': ('inline-group',),
-            'description': 'Pricing, weight, discount information, and discount percentage. Note: Calculated fields are automatically computed and read-only.'
-        }),
-        ('Metadata', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',),
-            'description': 'Timestamps and other metadata.'
-        }),
-    )
-
-    def get_discount_percentage(self, obj):
-        return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
-    get_discount_percentage.short_description = "Discount Percentage"
+class CartItemInline(admin.TabularInline):
+    model = CartItem
+    extra = 0
+    fields = ('item', 'pricing_tier', 'pack_quantity', 'unit_type', 'user_exclusive_price', 
+              'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    readonly_fields = ('get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 'get_total', 'get_weight')
+    autocomplete_fields = ['item', 'pricing_tier', 'user_exclusive_price']
 
     def get_price_per_unit(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
         return pricing_data.price if pricing_data else Decimal('0.00')
-    get_price_per_unit.short_description = "Price Per Unit"
+    get_price_per_unit.short_description = "Unit Price"
 
     def get_price_per_pack(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
         return Decimal('0.00')
-    get_price_per_pack.short_description = "Price Per Pack"
+    get_price_per_pack.short_description = "Pack Price"
 
     def get_subtotal(self, obj):
         pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-        if pricing_data and obj.item.product_variant:
-            units_per_pack = obj.item.product_variant.units_per_pack
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
             per_pack_price = pricing_data.price * Decimal(units_per_pack)
-            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'))
         return Decimal('0.00')
     get_subtotal.short_description = "Subtotal"
 
@@ -841,48 +820,14 @@ class CartItemAdmin(admin.ModelAdmin):
         subtotal = self.get_subtotal(obj)
         discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
         discount = discount_percentage / Decimal('100.00')
-        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'))
     get_total.short_description = "Total"
 
     def get_weight(self, obj):
         item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
         total_units = obj.total_units
-        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    get_weight.short_description = "Weight"
-
-    def save_model(self, request, obj, form, change):
-        try:
-            # Check if CartItem already exists
-            existing_cart_item = CartItem.objects.filter(
-                cart=obj.cart,
-                item=obj.item,
-                pricing_tier=obj.pricing_tier,
-                unit_type=obj.unit_type
-            ).first()
-            
-            if existing_cart_item and existing_cart_item.pk != obj.pk:
-                # Update existing CartItem instead of creating new
-                existing_cart_item.pack_quantity += obj.pack_quantity
-                if obj.user_exclusive_price:
-                    existing_cart_item.user_exclusive_price = obj.user_exclusive_price
-                existing_cart_item.full_clean()
-                existing_cart_item.save()
-                obj = existing_cart_item
-            else:
-                # Save new or update existing CartItem
-                obj.full_clean()
-                obj.save()
-                
-        except ValidationError as e:
-            for field, errors in e.error_dict.items():
-                for error in errors:
-                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
-            raise
-
-    class Media:
-        css = {
-            'all': ('admin/css/custom_admin.css',),
-        }
+        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'))
+    get_weight.short_description = "Weight (kg)"
 
 class CartAdmin(admin.ModelAdmin):
     list_display = ('user', 'get_subtotal', 'vat', 'discount', 'get_total', 'get_total_units', 'get_total_packs', 'get_total_weight', 'created_at', 'updated_at')
@@ -945,7 +890,164 @@ class CartAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
+class CartItemAdmin(admin.ModelAdmin):
+    search_fields = ('cart__user__email', 'item__sku')
+    list_display = ('cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type', 
+                   'get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 
+                   'get_subtotal', 'get_total', 'get_weight', 'created_at')
+    list_filter = ('created_at', 'updated_at', 'unit_type')
+    readonly_fields = ('created_at', 'updated_at', 'get_discount_percentage', 
+                      'get_price_per_unit', 'get_price_per_pack', 'get_subtotal', 
+                      'get_total', 'get_weight')
+    ordering = ('cart', 'item')
+    autocomplete_fields = ['cart', 'item', 'pricing_tier', 'user_exclusive_price']
+    actions = ['update_pricing_tiers']
+
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('cart', 'item', 'pricing_tier', 'pack_quantity', 'unit_type'),
+            'description': 'Core cart item details.'
+        }),
+        ('Pricing Details', {
+            'fields': ('get_discount_percentage', 'get_price_per_unit', 'get_price_per_pack', 
+                      'get_subtotal', 'get_total', 'get_weight', 'user_exclusive_price'),
+            'classes': ('inline-group',),
+            'description': 'Pricing, weight, discount information. Calculated fields are read-only.'
+        }),
+        ('Metadata', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',),
+            'description': 'Timestamps and other metadata.'
+        }),
+    )
+
+    def get_discount_percentage(self, obj):
+        return obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+    get_discount_percentage.short_description = "Discount %"
+
+    def get_price_per_unit(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        return pricing_data.price if pricing_data else Decimal('0.00')
+    get_price_per_unit.short_description = "Unit Price"
+
+    def get_price_per_pack(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item:
+            return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
+        return Decimal('0.00')
+    get_price_per_pack.short_description = "Pack Price"
+
+    def get_subtotal(self, obj):
+        pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
+        if pricing_data and obj.item:
+            units_per_pack = obj.item.units_per_pack or 1
+            per_pack_price = pricing_data.price * Decimal(units_per_pack)
+            return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'))
+        return Decimal('0.00')
+    get_subtotal.short_description = "Subtotal"
+
+    def get_total(self, obj):
+        subtotal = self.get_subtotal(obj)
+        discount_percentage = obj.user_exclusive_price.discount_percentage if obj.user_exclusive_price else Decimal('0.00')
+        discount = discount_percentage / Decimal('100.00')
+        return (subtotal * (Decimal('1.00') - discount)).quantize(Decimal('0.01'))
+    get_total.short_description = "Total"
+
+    def get_weight(self, obj):
+        item_weight_kg = obj.convert_weight_to_kg(obj.item.weight, obj.item.weight_unit)
+        total_units = obj.total_units
+        return (item_weight_kg * Decimal(total_units)).quantize(Decimal('0.01'))
+    get_weight.short_description = "Weight (kg)"
+
+    def update_pricing_tiers(self, request, queryset):
+        """Admin action to update pricing tiers based on cart weight"""
+        for cart_item in queryset:
+            try:
+                cart_item.cart.update_pricing_tiers()
+            except Exception as e:
+                self.message_user(request, f"Error updating {cart_item}: {str(e)}", level=messages.ERROR)
+        self.message_user(request, "Pricing tiers updated successfully")
+    update_pricing_tiers.short_description = "Update pricing tiers"
+
+    def save_model(self, request, obj, form, change):
+        try:
+            with transaction.atomic():
+                # Check if item exists and has inventory
+                if obj.item and obj.item.track_inventory:
+                    available_stock = obj.item.stock
+                    if available_stock is not None and obj.pack_quantity * (obj.item.units_per_pack or 1) > available_stock:
+                        messages.error(request, 
+                            f"Insufficient stock for {obj.item.sku}. "
+                            f"Available: {available_stock} units, "
+                            f"Requested: {obj.pack_quantity * (obj.item.units_per_pack or 1)} units."
+                        )
+                        return
+
+                # Check for existing item with same cart, item and unit type
+                existing_cart_item = CartItem.objects.filter(
+                    cart=obj.cart,
+                    item=obj.item,
+                    unit_type=obj.unit_type
+                ).exclude(pk=obj.pk).first()
+                
+                if existing_cart_item:
+                    if obj.unit_type == 'pallet':
+                        # For pallets, override quantity and pricing tier
+                        existing_cart_item.pack_quantity = obj.pack_quantity
+                        existing_cart_item.pricing_tier = obj.pricing_tier
+                    else:
+                        # For packs, if same pricing tier, sum quantities
+                        if existing_cart_item.pricing_tier == obj.pricing_tier:
+                            existing_cart_item.pack_quantity += obj.pack_quantity
+                        else:
+                            # Different pricing tier - override
+                            existing_cart_item.pack_quantity = obj.pack_quantity
+                            existing_cart_item.pricing_tier = obj.pricing_tier
+                    
+                    # Update other fields
+                    existing_cart_item.user_exclusive_price = obj.user_exclusive_price
+                    existing_cart_item.full_clean()
+                    existing_cart_item.save()
+                    obj = existing_cart_item
+                else:
+                    obj.full_clean()
+                    obj.save()
+
+                # Update cart totals and pricing tiers
+                obj.cart.update_cart()
+                obj.cart.update_pricing_tiers()
+                
+        except ValidationError as e:
+            for field, errors in e.error_dict.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}" if field != '__all__' else error)
+            raise
+        except Exception as e:
+            messages.error(request, f"Error saving cart item: {str(e)}")
+            raise
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """Limit foreign key choices based on context"""
+        if db_field.name == "user_exclusive_price" and request._obj_ is not None:
+            kwargs["queryset"] = UserExclusivePrice.objects.filter(
+                user=request._obj_.cart.user,
+                item=request._obj_.item
+            )
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_form(self, request, obj=None, **kwargs):
+        """Store the object being edited for use in formfield_for_foreignkey"""
+        request._obj_ = obj
+        return super().get_form(request, obj, **kwargs)
+
+    class Media:
+        css = {
+            'all': ('admin/css/custom_admin.css',),
+        }
+        js = ('admin/js/cart_item_admin.js',)
+
 logger = logging.getLogger(__name__)
+
 
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
@@ -969,13 +1071,12 @@ class OrderItemInline(admin.TabularInline):
             # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
     get_price_per_unit.short_description = "Price Per Unit"
-    
 
     def get_price_per_pack(self, obj):
         try:
             pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-            if pricing_data and obj.item.product_variant:
-                return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+            if pricing_data and obj.item:
+                return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
             return Decimal('0.00')
         except Exception as e:
             # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
@@ -985,16 +1086,15 @@ class OrderItemInline(admin.TabularInline):
     def get_subtotal(self, obj):
         try:
             pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-            if pricing_data and obj.item.product_variant:
-                units_per_pack = obj.item.product_variant.units_per_pack
+            if pricing_data and obj.item:
+                units_per_pack = obj.item.units_per_pack or 1
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
                 return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             return Decimal('0.00')
         except Exception as e:
             # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
-            return Decimal('0.00')   
+            return Decimal('0.00')
     get_subtotal.short_description = "Subtotal"
-
 
     def get_total(self, obj):
         try:
@@ -1006,7 +1106,6 @@ class OrderItemInline(admin.TabularInline):
             # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
     get_total.short_description = "Total"
-    
 
     def get_weight(self, obj):
         try:
@@ -1016,13 +1115,12 @@ class OrderItemInline(admin.TabularInline):
         except Exception as e:
             # logger.error(f"Error getting weight for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
+    get_weight.short_description = "Weight"
 
     class Media:
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-    get_weight.short_description = "Weigth"
-    
 
 class OrderAdminForm(forms.ModelForm):
     class Meta:
@@ -1061,7 +1159,7 @@ class OrderAdminForm(forms.ModelForm):
             'pending': 'PENDING',
             'completed': 'COMPLETED',
             'failed': 'FAILED',
-            'refund': 'refund'
+            'refund': 'REFUND'  # Corrected case to match model
         }
         normalized = payment_status.upper() if payment_status else payment_status
         if normalized in payment_status_map:
@@ -1069,7 +1167,6 @@ class OrderAdminForm(forms.ModelForm):
         if normalized not in dict(Order.PAYMENT_STATUS_CHOICES):
             raise ValidationError(f'"{payment_status}" is not a valid choice.')
         return normalized
-
 
 class OrderAdmin(admin.ModelAdmin):
     form = OrderAdminForm
@@ -1174,7 +1271,6 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total units for order {obj.id}: {str(e)}")
             return 0
-        
     get_total_units.short_description = "Total Units"
 
     def get_total_packs(self, obj):
@@ -1184,7 +1280,6 @@ class OrderAdmin(admin.ModelAdmin):
         except Exception as e:
             logger.error(f"Error getting total packs for order {obj.id}: {str(e)}")
             return 0
-        
     get_total_packs.short_description = "Total Packs"
 
     def invoice_actions(self, obj):
@@ -1233,7 +1328,7 @@ class OrderAdmin(admin.ModelAdmin):
             f'<a href="{reverse("admin:regenerate_refund_receipt", args=[obj.id])}">Regenerate</a>',
         ]
         return admin.utils.format_html(" | ".join(buttons))
-    refund_receipt_actions.short_description = "refund Receipt Actions"
+    refund_receipt_actions.short_description = "Refund Receipt Actions"
 
     def save_model(self, request, obj, form, change):
         try:
@@ -1242,7 +1337,7 @@ class OrderAdmin(admin.ModelAdmin):
             obj.calculate_total()
             if obj.items.exists():
                 obj.generate_and_save_pdfs()
-                if obj.payment_verified or obj.payment_status in ['COMPLETED', 'refund']:
+                if obj.payment_verified or obj.payment_status in ['COMPLETED', 'REFUND']:
                     obj.generate_and_save_payment_receipts()
             messages.success(request, "Order saved successfully.")
         except ValidationError as e:
@@ -1454,10 +1549,10 @@ class OrderAdmin(admin.ModelAdmin):
                     save=True
                 )
                 refund_receipt_buffer.close()
-                logger.info(f"refund receipt regenerated for order {order.id}")
-                self.message_user(request, "refund receipt regenerated successfully.")
+                logger.info(f"Refund receipt regenerated for order {order.id}")
+                self.message_user(request, "Refund receipt regenerated successfully.")
             else:
-                logger.warning(f"refund receipt regeneration failed for order {order.id}")
+                logger.warning(f"Refund receipt regeneration failed for order {order.id}")
                 self.message_user(request, "Failed to regenerate refund receipt.", level=messages.ERROR)
         except Exception as e:
             logger.error(f"Error regenerating refund receipt for order {order.id}: {str(e)}")
@@ -1511,34 +1606,31 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting price per unit for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
-        
     get_price_per_unit.short_description = "Price Per Unit"
 
     def get_price_per_pack(self, obj):
         try:
             pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-            if pricing_data and obj.item.product_variant:
-                return pricing_data.price * Decimal(obj.item.product_variant.units_per_pack)
+            if pricing_data and obj.item:
+                return pricing_data.price * Decimal(obj.item.units_per_pack or 1)
             return Decimal('0.00')
         except Exception as e:
             # logger.error(f"Error getting price per pack for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
     get_price_per_pack.short_description = "Price Per Pack"
-    
 
     def get_subtotal(self, obj):
         try:
             pricing_data = PricingTierData.objects.filter(pricing_tier=obj.pricing_tier, item=obj.item).first()
-            if pricing_data and obj.item.product_variant:
-                units_per_pack = obj.item.product_variant.units_per_pack
+            if pricing_data and obj.item:
+                units_per_pack = obj.item.units_per_pack or 1
                 per_pack_price = pricing_data.price * Decimal(units_per_pack)
                 return (per_pack_price * Decimal(obj.pack_quantity)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             return Decimal('0.00')
         except Exception as e:
             # logger.error(f"Error getting subtotal for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
-    get_price_per_unit.short_description = "Price Subtotal"
-    
+    get_subtotal.short_description = "Subtotal"
 
     def get_total(self, obj):
         try:
@@ -1549,8 +1641,7 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting total for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
-    get_price_per_unit.short_description = "Price Total"
-    
+    get_total.short_description = "Total"
 
     def get_weight(self, obj):
         try:
@@ -1560,7 +1651,7 @@ class OrderItemAdmin(admin.ModelAdmin):
         except Exception as e:
             # logger.error(f"Error getting weight for order item {obj.id}: {str(e)}")
             return Decimal('0.00')
-    get_price_per_unit.short_description = "Price Total"
+    get_weight.short_description = "Weight"
 
     class Media:
         css = {
