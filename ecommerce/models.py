@@ -499,6 +499,7 @@ class TableField(models.Model):
 
     def __str__(self):
         return f"{self.product_variant.name} - {self.name} ({self.field_type}, {'Long' if self.long_field else 'Short'})"
+
 class Item(models.Model):
     """
     Represents a specific item within a product variant with attributes like SKU, stock, and dimensions.
@@ -1257,7 +1258,6 @@ class HRFlowable(Flowable):
         self.canv.setStrokeColor(self.color)
         self.canv.line(0, 0, self.width, 0)
 
-
 class Order(models.Model):
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
@@ -1503,7 +1503,8 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            data = [['SKU', 'Item', 'Qty - Packs', 'Unit Price', 'Subtotal', 'Total']]
+            # Updated to include Units column
+            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items: {items_exist}")
@@ -1519,21 +1520,29 @@ class Order(models.Model):
                         total_display = f"€{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
+                        
+                        # Calculate units
+                        units_per_pack = item.item.units_per_pack or 1
+                        total_units = item.pack_quantity * units_per_pack
+                        
                         data.append([
                             item.item.sku or "N/A",
                             item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
+                            str(total_units),  # Units column
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for invoice: {str(e)}")
-                        data.append(["N/A", "Error", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
             else:
                 logger.warning(f"No items found for order {self.id}")
-                data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[4*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+            # Updated column widths to accommodate new Units column
+            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1644,26 +1653,31 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            data = [['SKU', 'Item', 'Qty - Packs', 'Total Units']]
+            # Updated to include Units column
+            data = [['SKU', 'Item', 'Packs', 'Units', 'Total Units']]
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items for delivery note: {items_exist}")
             if items_exist:
                 for item in self.items.all():
                     try:
-                        total_units = item.total_units
+                        units_per_pack = item.item.units_per_pack or 1
+                        total_units = item.pack_quantity * units_per_pack
                         data.append([
                             item.item.sku or "N/A",
                             item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
-                            str(total_units)
+                            str(total_units),  # Units column
+                            str(item.total_units)
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for delivery note: {str(e)}")
-                        data.append(["N/A", "Error", "0", "0"])
+                        data.append(["N/A", "Error", "0", "0", "0"])
             else:
                 logger.warning(f"No items found for order {self.id}")
-                data.append(["N/A", "No items available", "0", "0"])
-            table = Table(data, colWidths=[4*cm, 6.5*cm, 2.5*cm, 3*cm])
+                data.append(["N/A", "No items available", "0", "0", "0"])
+            
+            # Updated column widths to accommodate new Units column
+            table = Table(data, colWidths=[3.5*cm, 5*cm, 2*cm, 2*cm, 3*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1755,7 +1769,8 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            data = [['SKU', 'Item', 'Qty - Packs', 'Unit Price', 'Subtotal', 'Total']]
+            # Updated to include Units column
+            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1770,20 +1785,28 @@ class Order(models.Model):
                         total_display = f"€{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
+                        
+                        # Calculate units
+                        units_per_pack = item.item.units_per_pack or 1
+                        total_units = item.pack_quantity * units_per_pack
+                        
                         data.append([
                             item.item.sku or "N/A",
                             item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
+                            str(total_units),  # Units column
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for paid receipt: {str(e)}")
-                        data.append(["N/A", "Error", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
             else:
-                data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[4*cm, 3.5*cm, 3*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+            # Updated column widths to accommodate new Units column
+            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1895,7 +1918,8 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            data = [['SKU', 'Item', 'Qty - Packs', 'Unit Price', 'Subtotal', 'Total']]
+            # Updated to include Units column
+            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1910,20 +1934,28 @@ class Order(models.Model):
                         total_display = f"€{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
+                        
+                        # Calculate units
+                        units_per_pack = item.item.units_per_pack or 1
+                        total_units = item.pack_quantity * units_per_pack
+                        
                         data.append([
                             item.item.sku or "N/A",
                             item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
+                            str(total_units),  # Units column
                             f"€{unit_price:.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for refund receipt: {str(e)}")
-                        data.append(["N/A", "Error", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
             else:
-                data.append(["N/A", "No items available", "0", "€0.00", "€0.00", "€0.00"])
-            table = Table(data, colWidths=[4*cm, 3.5*cm, 2.5*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+            # Updated column widths to accommodate new Units column
+            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -2105,7 +2137,7 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order {self.id} - {self.status}"
-
+    
 @receiver(pre_save, sender=Order)
 def handle_payment_verified(sender, instance, **kwargs):
     try:

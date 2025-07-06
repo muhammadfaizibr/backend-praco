@@ -482,7 +482,6 @@ class CartItemDetailSerializer(serializers.ModelSerializer):
         })
         return representation
 
-
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemDetailSerializer(many=True, read_only=True)
 
