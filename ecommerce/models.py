@@ -1171,7 +1171,7 @@ class Cart(models.Model):
     def update_pricing_tiers(self):
         from .models import PricingTier
         total_weight = self.calculate_total_weight()
-        use_pallet_pricing = total_weight >= Decimal('850.00')
+        use_pallet_pricing = total_weight >= Decimal('750.00')
 
         with transaction.atomic():
             for item in self.items.select_for_update():
