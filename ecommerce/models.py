@@ -999,7 +999,12 @@ class CartItem(models.Model):
             ).exclude(pk=self.pk).first()
 
             if existing_cart_item:
-                existing_cart_item.pack_quantity = self.pack_quantity
+                # If pallet pricing is active, sum quantities
+                if self.unit_type == 'pallet':
+                    existing_cart_item.pack_quantity += self.pack_quantity
+                else:
+                    existing_cart_item.pack_quantity = self.pack_quantity
+                    
                 existing_cart_item.pricing_tier = self.pricing_tier
                 existing_cart_item.user_exclusive_price = self.user_exclusive_price
                 existing_cart_item.full_clean()
@@ -1060,19 +1065,54 @@ class Cart(models.Model):
         unit_type = item_data.get('unit_type', 'pack')
         pack_quantity = item_data.get('pack_quantity', 0)
         
-        existing_item = self.items.filter(
-            item_id=item_id,
-            unit_type=unit_type
-        ).first()
+        # Check if item exists in any unit_type
+        existing_items = self.items.filter(item_id=item_id)
         
-        if existing_item:
-            existing_item.pack_quantity = pack_quantity
-            existing_item.pricing_tier = pricing_tier
-            existing_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_item.user_exclusive_price)
-            existing_item.full_clean()
-            existing_item.save()
-            self.update_pricing_tiers()
-            return existing_item
+        if existing_items.exists():
+            # Check if we're switching from pack to pallet pricing
+            existing_pack_item = existing_items.filter(unit_type='pack').first()
+            existing_pallet_item = existing_items.filter(unit_type='pallet').first()
+            
+            if unit_type == 'pallet' and existing_pack_item:
+                # Convert existing pack quantity to pallet equivalent
+                units_per_pallet = existing_pack_item.item.units_per_pack or 1
+                pallet_quantity = math.ceil(existing_pack_item.pack_quantity / units_per_pallet)
+                
+                # Sum with new pallet quantity
+                total_pallet_quantity = pallet_quantity + pack_quantity
+                
+                # Delete the old pack item
+                existing_pack_item.delete()
+                
+                # Create new pallet item
+                new_item = self.items.create(
+                    item=item_data['item'],
+                    pricing_tier=pricing_tier,
+                    pack_quantity=total_pallet_quantity,
+                    unit_type='pallet',
+                    user_exclusive_price=item_data.get('user_exclusive_price')
+                )
+                self.update_pricing_tiers()
+                return new_item
+            elif existing_pallet_item and unit_type == 'pallet':
+                # Just add to existing pallet quantity
+                existing_pallet_item.pack_quantity += pack_quantity
+                existing_pallet_item.pricing_tier = pricing_tier
+                existing_pallet_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_pallet_item.user_exclusive_price)
+                existing_pallet_item.full_clean()
+                existing_pallet_item.save()
+                self.update_pricing_tiers()
+                return existing_pallet_item
+            else:
+                # Default behavior for pack items
+                existing_item = existing_items.first()
+                existing_item.pack_quantity = pack_quantity
+                existing_item.pricing_tier = pricing_tier
+                existing_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_item.user_exclusive_price)
+                existing_item.full_clean()
+                existing_item.save()
+                self.update_pricing_tiers()
+                return existing_item
         else:
             if unit_type == 'pack' and not pricing_tier.no_end_range and pack_quantity > pricing_tier.range_end:
                 raise ValidationError(
@@ -1082,7 +1122,7 @@ class Cart(models.Model):
             new_item = self.items.create(**item_data)
             self.update_pricing_tiers()
             return new_item
-        
+
     def calculate_subtotal(self):
         total = Decimal('0.00')
         for item in self.items.all():

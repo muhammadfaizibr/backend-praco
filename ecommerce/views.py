@@ -22,11 +22,12 @@ from rest_framework.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from backend_praco.renderers import CustomRenderer
+import math
 
 class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 20
+    page_size = 1000
     page_size_query_param = 'page_size'
-    max_page_size = 100
+    max_page_size = 1000
 
 class CategoryViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
@@ -499,38 +500,81 @@ class CartItemViewSet(viewsets.ModelViewSet):
         item = Item.objects.get(id=item_id)
         pricing_tier = PricingTier.objects.get(id=pricing_tier_id)
 
-        existing_cart_item = CartItem.objects.filter(
-            cart=cart,
-            item=item,
-            unit_type=unit_type
-        ).first()
+        # Check all existing items for this product
+        existing_items = cart.items.filter(item=item)
+        existing_pack_item = existing_items.filter(unit_type='pack').first()
+        existing_pallet_item = existing_items.filter(unit_type='pallet').first()
 
         serializer_context = {'request': self.request}
-        if existing_cart_item:
-            existing_cart_item.pack_quantity = pack_quantity
-            existing_cart_item.pricing_tier = pricing_tier
-            existing_cart_item.user_exclusive_price = UserExclusivePrice.objects.filter(
-                id=user_exclusive_price_id,
-                user=cart.user,
-                item=item
-            ).first() if user_exclusive_price_id else None
-            existing_cart_item.full_clean()
-            existing_cart_item.save()
-            serializer = CartItemDetailSerializer(existing_cart_item, context=serializer_context)
-        else:
-            cart_item_data = {
-                'cart': cart,
-                'item': item,
-                'pricing_tier': pricing_tier,
-                'pack_quantity': pack_quantity,
-                'unit_type': unit_type,
-                'user_exclusive_price': UserExclusivePrice.objects.filter(
+        
+        if existing_items.exists():
+            # Handle switch from pack to pallet pricing
+            if unit_type == 'pallet' and existing_pack_item:
+                # Convert existing pack quantity to pallet equivalent
+                units_per_pallet = existing_pack_item.item.units_per_pack or 1
+                pallet_quantity = math.ceil(existing_pack_item.pack_quantity / units_per_pallet)
+                
+                # Sum with new pallet quantity
+                total_pallet_quantity = pallet_quantity + pack_quantity
+                
+                # Delete the old pack item
+                existing_pack_item.delete()
+                
+                # Create new pallet item
+                cart_item = CartItem(
+                    cart=cart,
+                    item=item,
+                    pricing_tier=pricing_tier,
+                    pack_quantity=total_pallet_quantity,
+                    unit_type='pallet',
+                    user_exclusive_price=UserExclusivePrice.objects.filter(
+                        id=user_exclusive_price_id,
+                        user=cart.user,
+                        item=item
+                    ).first() if user_exclusive_price_id else None
+                )
+                cart_item.full_clean()
+                cart_item.save()
+                serializer = CartItemDetailSerializer(cart_item, context=serializer_context)
+            elif existing_pallet_item and unit_type == 'pallet':
+                # Add to existing pallet quantity
+                existing_pallet_item.pack_quantity += pack_quantity
+                existing_pallet_item.pricing_tier = pricing_tier
+                existing_pallet_item.user_exclusive_price = UserExclusivePrice.objects.filter(
                     id=user_exclusive_price_id,
                     user=cart.user,
                     item=item
                 ).first() if user_exclusive_price_id else None
-            }
-            cart_item = CartItem(**cart_item_data)
+                existing_pallet_item.full_clean()
+                existing_pallet_item.save()
+                serializer = CartItemDetailSerializer(existing_pallet_item, context=serializer_context)
+            else:
+                # Default behavior for pack items
+                existing_item = existing_items.first()
+                existing_item.pack_quantity = pack_quantity
+                existing_item.pricing_tier = pricing_tier
+                existing_item.user_exclusive_price = UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=cart.user,
+                    item=item
+                ).first() if user_exclusive_price_id else None
+                existing_item.full_clean()
+                existing_item.save()
+                serializer = CartItemDetailSerializer(existing_item, context=serializer_context)
+        else:
+            # Create new item
+            cart_item = CartItem(
+                cart=cart,
+                item=item,
+                pricing_tier=pricing_tier,
+                pack_quantity=pack_quantity,
+                unit_type=unit_type,
+                user_exclusive_price=UserExclusivePrice.objects.filter(
+                    id=user_exclusive_price_id,
+                    user=cart.user,
+                    item=item
+                ).first() if user_exclusive_price_id else None
+            )
             cart_item.full_clean()
             cart_item.save()
             serializer = CartItemDetailSerializer(cart_item, context=serializer_context)

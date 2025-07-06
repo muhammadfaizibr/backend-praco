@@ -167,7 +167,7 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 100,
+    'PAGE_SIZE': 1000,
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
     ],
@@ -187,6 +187,8 @@ CORS_ALLOWED_ORIGINS = [
     "http://api.praco.co.uk",
     "https://app.praco.co.uk",
     "http://app.praco.co.uk",
+    "http://praco.co.uk",
+    "https://praco.co.uk",
 ]
 
 UNFOLD = {
@@ -367,6 +369,6 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'  # Use SMTP for pr
 EMAIL_HOST = 'smtp.gmail.com'  # Example: Gmail SMTP server
 EMAIL_PORT = 587  # TLS port for Gmail
 EMAIL_USE_TLS = True  # Use TLS for secure connection
-EMAIL_HOST_USER = 'siddiqui.faizmuhammad@gmail.com'  # Your email address
-EMAIL_HOST_PASSWORD = 'gbumssawbuhptjcr'  # App-specific password (not your regular password)
-DEFAULT_FROM_EMAIL = 'siddiqui.faizmuhammad@gmail.com'  # Default sender email
+EMAIL_HOST_USER = 'noreply.praco@gmail.com'  # Your email address
+EMAIL_HOST_PASSWORD = 'xjqm asck ygtn vxce'  # App-specific password (not your regular password)
+DEFAULT_FROM_EMAIL = 'noreply.praco@gmail.com'  # Default sender email

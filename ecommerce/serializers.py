@@ -334,7 +334,6 @@ class UserExclusivePriceSerializer(serializers.ModelSerializer):
         model = UserExclusivePrice
         fields = ['id', 'user', 'item', 'discount_percentage', 'created_at']
 
-
 class CartItemSerializer(serializers.ModelSerializer):
     cart = serializers.PrimaryKeyRelatedField(queryset=Cart.objects.all())
     item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
@@ -562,7 +561,7 @@ class CartSerializer(serializers.ModelSerializer):
             instance.update_pricing_tiers()
         
         return instance
-    
+
 class OrderItemSerializer(serializers.ModelSerializer):
     order = serializers.PrimaryKeyRelatedField(queryset=Order.objects.all())
     item = serializers.PrimaryKeyRelatedField(queryset=Item.objects.all(), required=True)
