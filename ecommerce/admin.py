@@ -14,6 +14,7 @@ from django.urls import reverse, path
 from django.utils.html import format_html
 from backend_praco.utils import send_email
 from django.db import transaction
+from django.utils.translation import gettext_lazy as _
 
 class CategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'created_at')
@@ -178,6 +179,7 @@ class PricingTierInline(admin.TabularInline):
             'all': ('admin/css/custom_admin.css',),
         }
 
+
 class PricingTierAdmin(admin.ModelAdmin):
     list_display = ('product_variant', 'tier_type', 'range_start', 'range_end', 'no_end_range', 'created_at')
     search_fields = ('product_variant__name', 'tier_type')
@@ -194,7 +196,11 @@ class PricingTierAdmin(admin.ModelAdmin):
         ('Range Details', {
             'fields': ('range_start', 'range_end', 'no_end_range'),
             'classes': ('inline-group',),
-            'description': 'For pack tiers, specify the quantity range (first tier starts at 1, sequential with no gaps). For pallet tiers, these fields are ignored as pricing is weight-based.'
+            'description': _(
+                'For pack tiers, specify the quantity range (first tier starts at 1, sequential with no gaps). '
+                'Range start and end can be equal for a tier specific to one quantity (e.g., 1-1 for 1 pack). '
+                'For pallet tiers, only one tier is allowed per product variant.'
+            )
         }),
         ('Metadata', {
             'fields': ('created_at',),
@@ -213,42 +219,55 @@ class PricingTierAdmin(admin.ModelAdmin):
 
             if obj.tier_type == 'pallet':
                 if existing_tiers.exists():
-                    messages.error(request, "Only one pallet pricing tier is allowed per product variant.")
+                    messages.error(request, _("Only one pallet pricing tier is allowed per product variant."))
                     return
             elif obj.tier_type == 'pack':
-                # Check if a tier with range_start=1 exists
-                has_first_tier = any(tier.range_start == 1 for tier in existing_tiers)
-                if not has_first_tier and obj.range_start != 1:
-                    messages.error(request, "The first pack pricing tier must start from 1.")
+                if obj.range_start <= 0:
+                    messages.error(request, _("Range start must be a positive number."))
                     return
+                if obj.no_end_range and obj.range_end is not None:
+                    messages.error(request, _("Range end must be null when 'No End Range' is checked."))
+                    return
+                if not obj.no_end_range and obj.range_end is None:
+                    messages.error(request, _("Range end is required when 'No End Range' is not checked."))
+                    return
+                if not obj.no_end_range and obj.range_end < obj.range_start:
+                    messages.error(request, _("Range end must be greater than or equal to range start."))
+                    return
+
                 # Validate sequential ranges
                 all_tiers = list(existing_tiers) + [obj]
                 all_tiers.sort(key=lambda x: x.range_start)
+                expected_start = 1
+                for tier in all_tiers:
+                    if tier.range_start != expected_start:
+                        messages.error(request, _(
+                            f"Range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} is not sequential. "
+                            f"Expected range start at {expected_start} for {obj.tier_type}."
+                        ))
+                        return
+                    if tier.no_end_range:
+                        expected_start = float('inf')  # No further tiers allowed
+                    else:
+                        expected_start = tier.range_end + 1
+                # Check for overlaps
                 for i in range(len(all_tiers) - 1):
                     current = all_tiers[i]
                     next_tier = all_tiers[i + 1]
                     current_end = float('inf') if current.no_end_range else (current.range_end if current.range_end is not None else float('inf'))
                     next_end = float('inf') if next_tier.no_end_range else (next_tier.range_end if next_tier.range_end is not None else float('inf'))
                     if current.range_start <= next_end and current_end >= next_tier.range_start:
-                        messages.error(request, (
+                        messages.error(request, _(
                             f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} overlaps with "
                             f"range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {obj.tier_type}."
                         ))
                         return
-                    if not current.no_end_range:
-                        current_end = current.range_end if current.range_end is not None else float('inf')
-                        if next_tier.range_start != current_end + 1:
-                            messages.error(request, (
-                                f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} creates a gap or is not sequential "
-                                f"with range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {obj.tier_type}. "
-                                "Ensure ranges are sequential with no gaps."
-                            ))
-                            return
+                # Ensure no_end_range is the last tier
                 for i in range(len(all_tiers) - 1):
                     current = all_tiers[i]
                     if current.no_end_range:
                         next_tier = all_tiers[i + 1]
-                        messages.error(request, (
+                        messages.error(request, _(
                             f"A tier with 'No End Range' checked must be the last tier. Cannot add {next_tier.range_start}-"
                             f"{'+' if next_tier.no_end_range else next_tier.range_end} after {current.range_start}+ for {obj.tier_type}."
                         ))
@@ -266,7 +285,6 @@ class PricingTierAdmin(admin.ModelAdmin):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
-
 
 class ProductVariantForm(forms.ModelForm):
     class Meta:
