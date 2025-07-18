@@ -39,7 +39,7 @@ def send_email(subject, body, receiver, is_html=True, attachments=None):
             f'      {body}'
             f'    </div>'
             f'    <div class="mt-8 border-t pt-4 text-gray-600">'
-            f'      <p>Please contact our support team at <a href="mailto:support@pracopackaging.co.uk" class="text-blue-600 hover:underline">support@pracopackaging.co.uk</a>.</p>'
+            f'      <p>Please contact our support team at <a href="mailto:support@praco.co.uk" class="text-blue-600 hover:underline">support@praco.co.uk</a>.</p>'
             f'      <p class="mt-4">Best regards,<br>The Praco Packaging Team<br>Praco Packaging Supplies Ltd.</p>'
             f'    </div>'
             f'  </div>'

@@ -39,7 +39,6 @@ class PricingTierDataSerializer(serializers.ModelSerializer):
         model = PricingTierData
         fields = ['id', 'item', 'pricing_tier', 'price', 'created_at']
 
-
 class PricingTierSerializer(serializers.ModelSerializer):
     pricing_data = PricingTierDataSerializer(many=True, read_only=True)
 
@@ -55,16 +54,16 @@ class PricingTierSerializer(serializers.ModelSerializer):
         product_variant = data.get('product_variant')
 
         # Basic validations
-        if not product_variant:
-            raise serializers.ValidationError("Product variant is required.")
-        if range_start <= 0:
-            raise serializers.ValidationError("Range start must be a positive number.")
         if no_end_range and range_end is not None:
             raise serializers.ValidationError("Range end must be null when 'No End Range' is checked.")
         if not no_end_range and range_end is None:
             raise serializers.ValidationError("Range end is required when 'No End Range' is not checked.")
-        if not no_end_range and range_end < range_start:
-            raise serializers.ValidationError("Range end must be greater than or equal to range start.")
+        if not product_variant:
+            raise serializers.ValidationError("Product variant is required.")
+        if range_start <= 0:
+            raise serializers.ValidationError("Range start must be a positive number.")
+        if not no_end_range and range_end <= range_start:
+            raise serializers.ValidationError("Range end must be greater than range start.")
 
         # Validate tier_type against show_units_per
         if product_variant:
@@ -85,59 +84,42 @@ class PricingTierSerializer(serializers.ModelSerializer):
                 existing_tiers = existing_tiers.exclude(id=instance.id)
             existing_tiers = existing_tiers.order_by('range_start')
 
-            # For pallet tiers, ensure only one tier exists
-            if tier_type == 'pallet' and existing_tiers.exists():
-                raise serializers.ValidationError("Only one pallet tier is allowed per product variant.")
+            # Check if this is the first tier
+            if not existing_tiers and range_start != 1:
+                raise serializers.ValidationError(f"The first {tier_type} tier must start from 1.")
 
-            # Check if this is the first pack tier
-            if tier_type == 'pack' and not existing_tiers and range_start != 1:
-                raise serializers.ValidationError("The first pack tier must start from 1.")
-
-            # Check for overlaps and sequential ranges
-            all_tiers = list(existing_tiers) + [PricingTier(
-                tier_type=tier_type,
-                range_start=range_start,
-                range_end=None if no_end_range else range_end,
-                no_end_range=no_end_range
-            )]
-            all_tiers.sort(key=lambda x: x.range_start)
-
-            # Check for overlaps
-            for i in range(len(all_tiers) - 1):
-                current = all_tiers[i]
-                next_tier = all_tiers[i + 1]
-                current_end = float('inf') if current.no_end_range else (current.range_end if current.range_end is not None else float('inf'))
-                next_end = float('inf') if next_tier.no_end_range else (next_tier.range_end if next_tier.range_end is not None else float('inf'))
-                if current.range_start <= next_end and current_end >= next_tier.range_start:
+            # Check for overlaps and gaps
+            current_end = float('inf') if no_end_range else range_end
+            for tier in existing_tiers:
+                tier_end = float('inf') if tier.no_end_range else tier.range_end
+                if range_start <= tier_end and current_end >= tier.range_start:
                     raise serializers.ValidationError(
-                        f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} overlaps with "
-                        f"range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {tier_type}."
+                        f"Range {range_start}-{'+' if no_end_range else range_end} overlaps with "
+                        f"existing range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} for {tier_type}."
                     )
 
-            # Check sequential ranges for pack tiers
-            if tier_type == 'pack' and existing_tiers:
+            # Check sequential ranges
+            if existing_tiers:
                 first_tier = existing_tiers.first()
                 if first_tier.range_start != 1:
-                    raise serializers.ValidationError("The first pack tier must start from 1.")
-                expected_start = 1
-                for tier in all_tiers:
-                    if tier.range_start != expected_start:
+                    raise serializers.ValidationError(f"The first {tier_type} tier must start from 1.")
+                sorted_tiers = list(existing_tiers)
+                if not no_end_range and range_end:
+                    sorted_tiers.append(PricingTier(
+                        tier_type=tier_type,
+                        range_start=range_start,
+                        range_end=range_end,
+                        no_end_range=no_end_range
+                    ))
+                    sorted_tiers.sort(key=lambda x: x.range_start)
+                for i in range(len(sorted_tiers) - 1):
+                    current = sorted_tiers[i]
+                    next_tier = sorted_tiers[i + 1]
+                    current_end = float('inf') if current.no_end_range else current.range_end
+                    if not current.no_end_range and next_tier.range_start != current.range_end + 1:
                         raise serializers.ValidationError(
-                            f"Range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} is not sequential. "
-                            f"Expected range start at {expected_start} for {tier_type}."
-                        )
-                    if tier.no_end_range:
-                        expected_start = float('inf')  # No further tiers allowed
-                    else:
-                        expected_start = tier.range_end + 1
-                # Ensure no_end_range is the last tier
-                for i in range(len(all_tiers) - 1):
-                    current = all_tiers[i]
-                    if current.no_end_range:
-                        next_tier = all_tiers[i + 1]
-                        raise serializers.ValidationError(
-                            f"A tier with 'No End Range' checked must be the last tier. Cannot add {next_tier.range_start}-"
-                            f"{'+' if next_tier.no_end_range else next_tier.range_end} after {current.range_start}+ for {tier_type}."
+                            f"Range {range_start}-{'+' if no_end_range else range_end} creates a gap or is not sequential "
+                            f"with existing ranges for {tier_type}. Ensure ranges are sequential with no gaps."
                         )
 
         return data

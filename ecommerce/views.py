@@ -158,11 +158,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='calculate-price')
     def calculate_price(self, request, pk=None):
         pv = self.get_object()
-        try:
-            units = int(request.query_params.get('units', 0))
-        except ValueError:
-            return Response({"error": "Units must be a valid integer"}, status=status.HTTP_400_BAD_REQUEST)
-
+        units = int(request.query_params.get('units', 0))
         price_per = request.query_params.get('price_per', 'pack')
 
         if units <= 0:
@@ -176,7 +172,7 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
         except Item.DoesNotExist:
             return Response({"error": "No items found for this product variant"}, status=status.HTTP_400_BAD_REQUEST)
 
-        units_per_pallet = pv.units_per_pallet or units_per_pack
+        units_per_pallet = units_per_pack  # Assuming pallet logic remains the same
         show_units_per = pv.show_units_per
 
         packs = 0
@@ -193,16 +189,12 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 pallets += 1
 
         total = Decimal('0.00')
-        applicable_tier = None
         if show_units_per in ['pack', 'both'] and price_per == 'pack':
             tiers = pv.pricing_tiers.filter(tier_type='pack').order_by('range_start')
+            applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
-                if tier.no_end_range:
-                    if packs >= tier.range_start:
-                        applicable_tier = tier
-                        break
-                elif packs >= tier.range_start and packs <= range_end:
+                if packs >= tier.range_start and packs <= range_end:
                     applicable_tier = tier
                     break
             if applicable_tier:
@@ -213,13 +205,10 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         elif show_units_per in ['pallet', 'both'] and price_per == 'pallet':
             tiers = pv.pricing_tiers.filter(tier_type='pallet').order_by('range_start')
+            applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
-                if tier.no_end_range:
-                    if pallets >= tier.range_start:
-                        applicable_tier = tier
-                        break
-                elif pallets >= tier.range_start and pallets <= range_end:
+                if pallets >= tier.range_start and pallets <= range_end:
                     applicable_tier = tier
                     break
             if applicable_tier:
@@ -229,15 +218,11 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            # Default to pack pricing
             tiers = pv.pricing_tiers.filter(tier_type='pack').order_by('range_start')
+            applicable_tier = None
             for tier in tiers:
                 range_end = tier.range_end if tier.range_end is not None else float('inf')
-                if tier.no_end_range:
-                    if packs >= tier.range_start:
-                        applicable_tier = tier
-                        break
-                elif packs >= tier.range_start and packs <= range_end:
+                if packs >= tier.range_start and packs <= range_end:
                     applicable_tier = tier
                     break
             if applicable_tier:
@@ -248,16 +233,11 @@ class ProductVariantViewSet(viewsets.ModelViewSet):
                 except PricingTierData.DoesNotExist:
                     return Response({"error": f"No pricing data found for tier {applicable_tier}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not applicable_tier:
-            return Response({"error": "No applicable pricing tier found for the given units"}, status=status.HTTP_400_BAD_REQUEST)
-
         return Response({
             'units': units,
             'packs': packs,
             'pallets': pallets,
-            'total': float(total),
-            'tier_id': applicable_tier.id,
-            'tier_type': applicable_tier.tier_type
+            'total': float(total)
         })
 
 class PricingTierViewSet(viewsets.ModelViewSet):

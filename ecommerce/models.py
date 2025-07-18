@@ -25,7 +25,6 @@ from phonenumber_field.modelfields import PhoneNumberField
 from backend_praco.utils import send_email
 import math
 from django.db.models import Sum 
-from django.utils.translation import gettext_lazy as _
 
 class Category(models.Model):
     """
@@ -187,163 +186,220 @@ class ProductVariant(models.Model):
     def __str__(self):
         return f"{self.product.name} - {self.name}"
 
-
 class PricingTier(models.Model):
-    product_variant = models.ForeignKey(
-        ProductVariant, 
-        on_delete=models.CASCADE, 
-        related_name='pricing_tiers'
+    """
+    Defines pricing tiers for product variants based on quantity ranges for packs or weight-based for pallets.
+    """
+    TIER_TYPES = (
+        ('pack', 'Pack'),
+        ('pallet', 'Pallet'),
     )
-    tier_type = models.CharField(
-        max_length=10,
-        choices=[('pack', 'Pack'), ('pallet', 'Pallet')]
-    )
-    range_start = models.PositiveIntegerField()
-    range_end = models.PositiveIntegerField(null=True, blank=True)
-    no_end_range = models.BooleanField(default=False)
+
+    product_variant = models.ForeignKey('ProductVariant', on_delete=models.CASCADE, related_name='pricing_tiers')
+    tier_type = models.CharField(max_length=10, choices=TIER_TYPES)
+    range_start = models.PositiveIntegerField(default=1, blank=True, help_text="Start of range for pack tiers; ignored for pallet tiers")
+    range_end = models.PositiveIntegerField(null=True, blank=True, help_text="End of range for pack tiers; ignored for pallet tiers")
+    no_end_range = models.BooleanField(default=False, help_text="Check if this pack tier has no end range; ignored for pallet tiers")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['product_variant', 'tier_type', 'range_start']
+        indexes = [
+            models.Index(fields=['product_variant', 'tier_type']),
+            models.Index(fields=['created_at']),
+        ]
+        verbose_name = 'pricing tier'
+        verbose_name_plural = 'pricing tiers'
 
     def clean(self):
-        # Standard validations
-        if self.range_start <= 0:
-            raise ValidationError(
-                _("Range start must be a positive number.")
-            )
-        if self.no_end_range and self.range_end is not None:
-            raise ValidationError(
-                _("Range end must be null when 'No End Range' is checked.")
-            )
-        if not self.no_end_range and self.range_end is None:
-            raise ValidationError(
-                _("Range end is required when 'No End Range' is not checked.")
-            )
-        if not self.no_end_range and self.range_end < self.range_start:
-            raise ValidationError(
-                _("Range end must be greater than or equal to range start.")
-            )
+        errors = {}
+        if not self.product_variant:
+            errors['product_variant'] = "Please select a product variant for this pricing tier."
 
-        # Validate tier_type against show_units_per
+        # Validate tier_type against product_variant.show_units_per
         if self.product_variant:
             if self.product_variant.show_units_per == 'pack' and self.tier_type != 'pack':
-                raise ValidationError(
-                    _("Tier type must be 'pack' when show_units_per is 'Pack'.")
-                )
-            if self.product_variant.show_units_per == 'both' and self.tier_type not in ['pack', 'pallet']:
-                raise ValidationError(
-                    _("Tier type must be 'pack' or 'pallet' when show_units_per is 'Both'.")
-                )
+                errors['tier_type'] = "Only 'Pack' tier type is allowed when the variant is set to show only pack."
+            elif self.product_variant.show_units_per == 'both' and self.tier_type not in ['pack', 'pallet']:
+                errors['tier_type'] = "Tier type must be either 'Pack' or 'Pallet' when showing both."
 
-            # Validate pallet tier constraints
+        # Validate tiers
+        if self.product_variant:
+            # Fetch existing tiers except the current one (for updates)
             existing_tiers = PricingTier.objects.filter(
                 product_variant=self.product_variant,
                 tier_type=self.tier_type
-            ).exclude(id=self.id)
-            
-            if self.tier_type == 'pallet' and existing_tiers.exists():
-                raise ValidationError(
-                    _("Only one pallet pricing tier is allowed per product variant.")
-                )
-            
-            # Validate sequential ranges for pack tiers
-            if self.tier_type == 'pack':
-                all_tiers = list(existing_tiers) + [self]
+            ).exclude(id=self.id if self.id else None).order_by('range_start')
+
+            # Validate pallet tiers
+            if self.tier_type == 'pallet':
+                if existing_tiers.exists():
+                    errors['tier_type'] = "Only one pallet tier is allowed per product variant."
+            # Validate pack tiers
+            elif self.tier_type == 'pack':
+                if self.range_start <= 0:
+                    errors['range_start'] = "Range start must be a positive number."
+                elif self.no_end_range and self.range_end is not None:
+                    errors['range_end'] = "Range end must be blank when 'No End Range' is checked."
+                elif not self.no_end_range and self.range_end is None:
+                    errors['range_end'] = "Range end is required for pack tiers unless 'No End Range' is checked."
+                elif not self.no_end_range and self.range_end < self.range_start:
+                    errors['range_end'] = "Range end must be equal or greater than range start for pack tiers."
+
+                all_tiers = list(existing_tiers)
+                all_tiers.append(self)
                 all_tiers.sort(key=lambda x: x.range_start)
-                expected_start = 1
-                for tier in all_tiers:
-                    if tier.range_start != expected_start:
-                        raise ValidationError(
-                            _(
-                                f"Range {tier.range_start}-{'+' if tier.no_end_range else tier.range_end} is not sequential. "
-                                f"Expected range start at {expected_start} for {self.tier_type}."
-                            )
-                        )
-                    if tier.no_end_range:
-                        expected_start = float('inf')  # No further tiers allowed
-                    else:
-                        expected_start = tier.range_end + 1
+
+                # Check if any tier starts at 1
+                has_first_tier = any(tier.range_start == 1 for tier in existing_tiers)
                 
-                # Check for overlaps
+                # If no existing tier starts at 1, this tier must start at 1
+                if not has_first_tier and self.range_start != 1:
+                    errors['range_start'] = "The first pack tier must start from 1."
+
+                # Check for overlaps, gaps, and ensure no_end_range is last
                 for i in range(len(all_tiers) - 1):
                     current = all_tiers[i]
                     next_tier = all_tiers[i + 1]
                     current_end = float('inf') if current.no_end_range else (current.range_end if current.range_end is not None else float('inf'))
                     next_end = float('inf') if next_tier.no_end_range else (next_tier.range_end if next_tier.range_end is not None else float('inf'))
+                    
+                    # Check for overlaps
                     if current.range_start <= next_end and current_end >= next_tier.range_start:
-                        raise ValidationError(
-                            _(
-                                f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} overlaps with "
-                                f"range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {self.tier_type}."
-                            )
+                        errors['range_start'] = (
+                            f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} overlaps with "
+                            f"range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {self.tier_type}."
                         )
+                        break
+                    
+                    # Check for gaps and sequential order
+                    if not current.no_end_range:
+                        current_end = current.range_end if current.range_end is not None else float('inf')
+                        if next_tier.range_start != current_end + 1:
+                            errors['range_start'] = (
+                                f"Range {current.range_start}-{'+' if current.no_end_range else current.range_end} creates a gap or is not sequential "
+                                f"with range {next_tier.range_start}-{'+' if next_tier.no_end_range else next_tier.range_end} for {self.tier_type}. "
+                                "Ensure ranges are sequential with no gaps."
+                            )
+                            break
                 
                 # Ensure no_end_range is the last tier
                 for i in range(len(all_tiers) - 1):
                     current = all_tiers[i]
                     if current.no_end_range:
                         next_tier = all_tiers[i + 1]
-                        raise ValidationError(
-                            _(
-                                f"A tier with 'No End Range' checked must be the last tier. Cannot add {next_tier.range_start}-"
-                                f"{'+' if next_tier.no_end_range else next_tier.range_end} after {current.range_start}+ for {self.tier_type}."
-                            )
+                        errors['range_start'] = (
+                            f"A tier with 'No End Range' checked must be the last tier. Cannot add {next_tier.range_start}-"
+                            f"{'+' if next_tier.no_end_range else next_tier.range_end} after {current.range_start}+ for {self.tier_type}."
                         )
+                        break
+
+        if errors:
+            raise ValidationError(errors)
+
+    @classmethod
+    def get_appropriate_tier(cls, product_variant, quantity, tier_type='pack'):
+        """
+        Find the best pricing tier for a given quantity and tier type.
+        Returns the most appropriate pricing tier based on the quantity.
+        """
+        tiers = cls.objects.filter(
+            product_variant=product_variant,
+            tier_type=tier_type
+        ).order_by('range_start')
+
+        if not tiers.exists():
+            return None
+
+        # For pallet tiers, just return the single pallet tier
+        if tier_type == 'pallet':
+            return tiers.first()
+
+        # For pack tiers, find the best matching tier
+        for tier in tiers:
+            if quantity >= tier.range_start and (
+                tier.no_end_range or (tier.range_end and quantity <= tier.range_end)
+            ):
+                return tier
+
+        # If no exact match found, return the highest tier that's below the quantity
+        # This is useful when quantity exceeds all tier ranges
+        return tiers.last()
 
     def check_pricing_tiers_conditions(self):
         """
-        Validates that the pricing tiers for the associated product variant are correctly configured.
-        Returns True if conditions are met, False otherwise.
+        Check if the pricing tiers for the associated ProductVariant meet the conditions to set status='active'.
         """
-        if not self.product_variant:
-            return False
+        try:
+            pricing_tiers = self.product_variant.pricing_tiers.all()
+            if not hasattr(pricing_tiers, '__iter__'):
+                return False
+            pack_tiers = sorted([tier for tier in pricing_tiers if tier.tier_type == 'pack'], 
+                              key=lambda x: x.range_start)
+            pallet_tiers = [tier for tier in pricing_tiers if tier.tier_type == 'pallet']
 
-        if self.tier_type == 'pallet':
-            # Only one pallet tier allowed
-            return not PricingTier.objects.filter(
-                product_variant=self.product_variant,
-                tier_type='pallet'
-            ).exclude(id=self.id).exists()
-
-        if self.tier_type == 'pack':
-            # Ensure sequential, non-overlapping ranges starting from 1
-            tiers = PricingTier.objects.filter(
-                product_variant=self.product_variant,
-                tier_type='pack'
-            ).exclude(id=self.id)
-            all_tiers = list(tiers) + [self]
-            all_tiers.sort(key=lambda x: x.range_start)
-
-            expected_start = 1
-            for tier in all_tiers:
-                if tier.range_start != expected_start:
+            # Validate show_units_per settings
+            if self.product_variant.show_units_per == 'pack':
+                if not pack_tiers or pallet_tiers:
                     return False
-                if tier.no_end_range:
-                    expected_start = float('inf')
-                else:
-                    expected_start = tier.range_end + 1
-
-                # Check for overlaps
-                for i in range(len(all_tiers) - 1):
-                    current = all_tiers[i]
-                    next_tier = all_tiers[i + 1]
-                    current_end = float('inf') if current.no_end_range else current.range_end
-                    next_end = float('inf') if next_tier.no_end_range else next_tier.range_end
-                    if current.range_start <= next_end and current_end >= next_tier.range_start:
+                pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+                if len(pack_no_end) != 1:
+                    return False
+                if pack_tiers and pack_tiers[0].range_start != 1:
+                    return False
+                for tier in pack_tiers:
+                    if not tier.no_end_range and tier.range_end is None:
+                        return False
+                for i in range(len(pack_tiers) - 1):
+                    current = pack_tiers[i]
+                    next_tier = pack_tiers[i + 1]
+                    if current.no_end_range:
+                        return False  # No tiers should exist after no_end_range
+                    current_end = current.range_end if current.range_end is not None else float('inf')
+                    if next_tier.range_start != current_end + 1:
+                        return False
+            elif self.product_variant.show_units_per == 'both':
+                if not pack_tiers or not pallet_tiers:
+                    return False
+                pack_no_end = [tier for tier in pack_tiers if tier.no_end_range]
+                if len(pack_no_end) != 1:
+                    return False
+                if len(pallet_tiers) > 1:
+                    return False
+                if pack_tiers and pack_tiers[0].range_start != 1:
+                    return False
+                for tier in pack_tiers:
+                    if not tier.no_end_range and tier.range_end is None:
+                        return False
+                for i in range(len(pack_tiers) - 1):
+                    current = pack_tiers[i]
+                    next_tier = pack_tiers[i + 1]
+                    if current.no_end_range:
+                        return False  # No tiers should exist after no_end_range
+                    current_end = current.range_end if current.range_end is not None else float('inf')
+                    if next_tier.range_start != current_end + 1:
                         return False
 
-                # Ensure no_end_range is the last tier
-                if current.no_end_range and i < len(all_tiers) - 1:
-                    return False
+            return True
+        except Exception:
+            return False
 
-            # Check if at least one pack tier has no_end_range
-            return any(tier.no_end_range for tier in all_tiers)
-
-        return True
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+        try:
+            if self.check_pricing_tiers_conditions():
+                self.product_variant.status = 'active'
+            else:
+                self.product_variant.status = 'draft'
+            self.product_variant.save()
+        except Exception:
+            pass
 
     def __str__(self):
-        return f"{self.product_variant} - {self.tier_type} Tier ({self.range_start}-{'+' if self.no_end_range else self.range_end})"
+        if self.tier_type == 'pallet':
+            return f"{self.product_variant} - {self.tier_type}"
+        range_str = f"{self.range_start}-" + ("+" if self.no_end_range else str(self.range_end))
+        return f"{self.product_variant} - {self.tier_type} - {range_str}"
 
 @receiver(post_delete, sender=PricingTier)
 def update_product_variant_status_on_delete(sender, instance, **kwargs):
@@ -469,7 +525,7 @@ class Item(models.Model):
     title = models.CharField(max_length=255, blank=True, null=True)
     sku = models.CharField(max_length=100, unique=True)
     is_physical_product = models.BooleanField(default=False)
-    weight = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    weight = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     weight_unit = models.CharField(max_length=2, choices=WEIGHT_UNIT_CHOICES, blank=True, null=True)
     track_inventory = models.BooleanField(default=False)
     stock = models.IntegerField(blank=True, null=True)
@@ -567,11 +623,11 @@ class Item(models.Model):
             # Category-based validation for dimensions
             required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
             if category_name in required_categories:
-                if self.height is None or self.height <= 0:
+                if self.height is None or self.height < 0:
                     errors['height'] = "Height must be a positive number for this category."
-                if self.width is None or self.width <= 0:
+                if self.width is None or self.width < 0:
                     errors['width'] = "Width must be a positive number for this category."
-                if self.length is None or self.length <= 0:
+                if self.length is None or self.length < 0:
                     errors['length'] = "Length must be a positive number for this category."
                 if not self.measurement_unit:
                     errors['measurement_unit'] = "Please select a measurement unit for this category."
@@ -1115,7 +1171,7 @@ class Cart(models.Model):
     def update_pricing_tiers(self):
         from .models import PricingTier
         total_weight = self.calculate_total_weight()
-        use_pallet_pricing = total_weight >= Decimal('850.00')
+        use_pallet_pricing = total_weight >= Decimal('750.00')
 
         with transaction.atomic():
             for item in self.items.select_for_update():
@@ -1488,7 +1544,7 @@ class Order(models.Model):
             elements.append(Spacer(1, 0.5*cm))
 
             # Updated to include Units column
-            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items: {items_exist}")
@@ -1497,7 +1553,7 @@ class Order(models.Model):
                     try:
                         original_item_subtotal = item.calculate_original_subtotal()
                         item_subtotal = item.calculate_subtotal()
-                        pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+                        pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first() 
                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
                         discount_percent = item.calculate_discount_percentage()
                         original_subtotal += item_subtotal
@@ -1511,10 +1567,10 @@ class Order(models.Model):
                         
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title[:18] if item.item.title else "N/A",
+                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             str(total_units),  # Units column
-                            f"€{unit_price:.2f}",
+                            f"€{(unit_price * units_per_pack):.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
@@ -1638,7 +1694,7 @@ class Order(models.Model):
             elements.append(Spacer(1, 0.5*cm))
 
             # Updated to include Units column
-            data = [['SKU', 'Item', 'Packs', 'Units', 'Total Units']]
+            data = [['SKU', 'Boxes', 'Units', 'Total Units']]
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items for delivery note: {items_exist}")
             if items_exist:
@@ -1648,7 +1704,7 @@ class Order(models.Model):
                         total_units = item.pack_quantity * units_per_pack
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title[:18] if item.item.title else "N/A",
+                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             str(total_units),  # Units column
                             str(item.total_units)
@@ -1754,7 +1810,7 @@ class Order(models.Model):
             elements.append(Spacer(1, 0.5*cm))
 
             # Updated to include Units column
-            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1776,10 +1832,10 @@ class Order(models.Model):
                         
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title[:18] if item.item.title else "N/A",
+                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             str(total_units),  # Units column
-                            f"€{unit_price:.2f}",
+                            f"€{(unit_price * units_per_pack):.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
@@ -1903,7 +1959,7 @@ class Order(models.Model):
             elements.append(Spacer(1, 0.5*cm))
 
             # Updated to include Units column
-            data = [['SKU', 'Item', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1925,10 +1981,10 @@ class Order(models.Model):
                         
                         data.append([
                             item.item.sku or "N/A",
-                            item.item.title[:18] if item.item.title else "N/A",
+                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
                             str(total_units),  # Units column
-                            f"€{unit_price:.2f}",
+                            f"€{(unit_price * units_per_pack):.2f}",
                             f"€{original_item_subtotal:.2f}",
                             total_display
                         ])
