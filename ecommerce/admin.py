@@ -3,7 +3,7 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from .models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
-    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, BillingAddress, ShippingAddress
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, Address, Transaction
 )
 from decimal import Decimal, ROUND_HALF_UP
 import logging
@@ -411,6 +411,8 @@ class PricingTierDataInline(admin.TabularInline):
         css = {
             'all': ('admin/css/custom_admin.css',),
         }
+
+
 
 
 class PricingTierDataAdmin(admin.ModelAdmin):
@@ -1658,7 +1660,7 @@ class OrderItemAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
-class ShippingAddressAdmin(admin.ModelAdmin):
+class AddressAdmin(admin.ModelAdmin):
     list_display = ('id', 'user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'country', 'created_at')
     list_filter = ('country', 'city', 'created_at')
     search_fields = ('first_name', 'last_name', 'telephone_number', 'street', 'city', 'postal_code', 'country', 'user__email')
@@ -1678,20 +1680,12 @@ class ShippingAddressAdmin(admin.ModelAdmin):
             'all': ('admin/css/custom_admin.css',),
         }
 
-class BillingAddressAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'country', 'created_at')
-    list_filter = ('country', 'city', 'created_at')
-    search_fields = ('first_name', 'last_name', 'telephone_number', 'street', 'city', 'postal_code', 'country', 'user__email')
-    readonly_fields = ('created_at', 'updated_at')
-    fieldsets = (
-        (None, {
-            'fields': ('user', 'first_name', 'last_name', 'telephone_number', 'street', 'city', 'state', 'postal_code', 'country')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'updated_at'),
-            'classes': ('collapse',)
-        }),
-    )
+class TransactionAdmin(admin.ModelAdmin):
+    list_display =  ('stripe_payment_intent_id', 'amount', 'currency', 'status', 'created_at')
+
+    list_filter = ('stripe_payment_intent_id', 'status')
+    search_fields = ('stripe_payment_intent_id', 'status')
+    readonly_fields = ('created_at',)
 
     class Media:
         css = {
@@ -1715,5 +1709,5 @@ admin.site.register(Cart, CartAdmin)
 admin.site.register(CartItem, CartItemAdmin)
 admin.site.register(Order, OrderAdmin)
 admin.site.register(OrderItem, OrderItemAdmin)
-admin.site.register(BillingAddress, BillingAddressAdmin)
-admin.site.register(ShippingAddress, ShippingAddressAdmin)
+admin.site.register(Transaction, TransactionAdmin)
+admin.site.register(Address, AddressAdmin)

@@ -7,13 +7,13 @@ from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from ecommerce.models import (
     Category, Product, ProductImage, ProductVariant, PricingTier, PricingTierData,
-    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, ShippingAddress, BillingAddress
+    TableField, Item, ItemImage, ItemData, UserExclusivePrice, Cart, CartItem, Order, OrderItem, Address, Transaction
 )
 from ecommerce.serializers import (
     CategorySerializer, ProductImageSerializer, ProductSerializer, ProductVariantSerializer,
     PricingTierSerializer, PricingTierDataSerializer, TableFieldSerializer, ItemSerializer,
     ItemImageSerializer, ItemDataSerializer, UserExclusivePriceSerializer,
-    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer, OrderItemDetailSerializer, ShippingAddressSerializer, BillingAddressSerializer
+    CartSerializer, CartItemSerializer, OrderSerializer, OrderItemSerializer, CartItemDetailSerializer, OrderItemDetailSerializer, AddressSerializer
 )
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, SearchHeadline
 from django.db.models import Q
@@ -22,7 +22,15 @@ from rest_framework.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from backend_praco.renderers import CustomRenderer
-import math
+import stripe
+from django.conf import settings
+import logging
+from rest_framework.views import APIView
+
+
+logger = logging.getLogger(__name__)
+
+stripe.api_key = settings.STRIPE_SECRET_KEY
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 1000
@@ -421,6 +429,7 @@ class UserExclusivePriceViewSet(viewsets.ModelViewSet):
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
+
 class CartViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     queryset = Cart.objects.all()
@@ -471,6 +480,8 @@ class CartItemViewSet(viewsets.ModelViewSet):
             cart, created = Cart.get_or_create_cart(request.user)
             data = request.data.copy() if isinstance(request.data, dict) else request.data
             
+            print(f"[DEBUG] CartItemViewSet.create: data={data}")
+            
             if isinstance(data, list):
                 responses = []
                 with transaction.atomic():
@@ -485,6 +496,7 @@ class CartItemViewSet(viewsets.ModelViewSet):
                 cart.update_pricing_tiers()
                 return Response(response, status=status.HTTP_200_OK)
         except ValidationError as e:
+            print(f"[DEBUG] CartItemViewSet.create: ValidationError={str(e)}")
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def _process_cart_item(self, data, cart):
@@ -494,91 +506,81 @@ class CartItemViewSet(viewsets.ModelViewSet):
         unit_type = data.get('unit_type', 'pack')
         user_exclusive_price_id = data.get('user_exclusive_price')
 
+        print(f"[DEBUG] _process_cart_item: item_id={item_id}, pricing_tier_id={pricing_tier_id}, pack_quantity={pack_quantity}, unit_type={unit_type}, user_exclusive_price_id={user_exclusive_price_id}")
+
         if not item_id:
             raise ValidationError({"item": "Item ID is required."})
 
         item = Item.objects.get(id=item_id)
         pricing_tier = PricingTier.objects.get(id=pricing_tier_id)
 
-        # Check all existing items for this product
-        existing_items = cart.items.filter(item=item)
-        existing_pack_item = existing_items.filter(unit_type='pack').first()
-        existing_pallet_item = existing_items.filter(unit_type='pallet').first()
+        # Calculate total weight excluding current item
+        current_weight = sum(ci.total_weight_kg for ci in cart.items.exclude(item_id=item_id))
+        new_units = pack_quantity * (item.units_per_pack or 1)
+        new_weight = cart.convert_weight_to_kg(item.weight * new_units, item.weight_unit)
+        total_weight = current_weight + new_weight
+        has_pallet_pricing = item.product_variant.pricing_tiers.filter(tier_type='pallet').exists()
+        target_unit_type = 'pallet' if total_weight >= Decimal('750.00') and has_pallet_pricing else 'pack'
 
-        serializer_context = {'request': self.request}
-        
-        if existing_items.exists():
-            # Handle switch from pack to pallet pricing
-            if unit_type == 'pallet' and existing_pack_item:
-                # Convert existing pack quantity to pallet equivalent
-                units_per_pallet = existing_pack_item.item.units_per_pack or 1
-                pallet_quantity = math.ceil(existing_pack_item.pack_quantity / units_per_pallet)
-                
-                # Sum with new pallet quantity
-                total_pallet_quantity = pallet_quantity + pack_quantity
-                
-                # Delete the old pack item
-                existing_pack_item.delete()
-                
-                # Create new pallet item
-                cart_item = CartItem(
-                    cart=cart,
-                    item=item,
-                    pricing_tier=pricing_tier,
-                    pack_quantity=total_pallet_quantity,
-                    unit_type='pallet',
-                    user_exclusive_price=UserExclusivePrice.objects.filter(
-                        id=user_exclusive_price_id,
-                        user=cart.user,
-                        item=item
-                    ).first() if user_exclusive_price_id else None
+        print(f"[DEBUG] Weight calc: new_units={new_units}, new_weight={new_weight}, current_weight={current_weight}, total_weight={total_weight}, target_unit_type={target_unit_type}")
+
+        # Sum existing quantities for this item (regardless of unit_type)
+        existing_items = cart.items.filter(item_id=item_id)
+        total_pack_quantity = pack_quantity
+        for existing_item in existing_items:
+            print(f"[DEBUG] Existing item: id={existing_item.id}, pack_quantity={existing_item.pack_quantity}, unit_type={existing_item.unit_type}")
+            total_pack_quantity += existing_item.pack_quantity
+            existing_item.delete()  # Consolidate into one item
+
+        print(f"[DEBUG] Total pack quantity: {total_pack_quantity}")
+
+        # Find appropriate pricing tier based on total weight and quantity
+        new_pricing_tier = PricingTier.get_appropriate_tier(
+            product_variant=item.product_variant,
+            quantity=total_pack_quantity,
+            tier_type=target_unit_type
+        )
+
+        if not new_pricing_tier:
+            new_pricing_tier = item.product_variant.pricing_tiers.filter(
+                tier_type=target_unit_type
+            ).order_by('-range_start').first()
+
+        if not new_pricing_tier:
+            print(f"[DEBUG] Error: No suitable {target_unit_type} pricing tier found for quantity {total_pack_quantity}")
+            raise ValidationError(f"No suitable {target_unit_type} pricing tier found for quantity {total_pack_quantity}.")
+
+        print(f"[DEBUG] Selected pricing tier: id={new_pricing_tier.id}, tier_type={target_unit_type}, range_start={new_pricing_tier.range_start}")
+
+        # Validate inventory
+        if item.track_inventory:
+            total_units = total_pack_quantity * (item.units_per_pack or 1)
+            available_stock = item.stock or 0
+            if total_units > available_stock:
+                print(f"[DEBUG] Inventory error: total_units={total_units}, available_stock={available_stock}")
+                raise ValidationError(
+                    f"Insufficient stock for {item.sku}. Total available: {available_stock} units, Requested: {total_units} units."
                 )
-                cart_item.full_clean()
-                cart_item.save()
-                serializer = CartItemDetailSerializer(cart_item, context=serializer_context)
-            elif existing_pallet_item and unit_type == 'pallet':
-                # Add to existing pallet quantity
-                existing_pallet_item.pack_quantity += pack_quantity
-                existing_pallet_item.pricing_tier = pricing_tier
-                existing_pallet_item.user_exclusive_price = UserExclusivePrice.objects.filter(
-                    id=user_exclusive_price_id,
-                    user=cart.user,
-                    item=item
-                ).first() if user_exclusive_price_id else None
-                existing_pallet_item.full_clean()
-                existing_pallet_item.save()
-                serializer = CartItemDetailSerializer(existing_pallet_item, context=serializer_context)
-            else:
-                # Default behavior for pack items
-                existing_item = existing_items.first()
-                existing_item.pack_quantity = pack_quantity
-                existing_item.pricing_tier = pricing_tier
-                existing_item.user_exclusive_price = UserExclusivePrice.objects.filter(
-                    id=user_exclusive_price_id,
-                    user=cart.user,
-                    item=item
-                ).first() if user_exclusive_price_id else None
-                existing_item.full_clean()
-                existing_item.save()
-                serializer = CartItemDetailSerializer(existing_item, context=serializer_context)
-        else:
-            # Create new item
-            cart_item = CartItem(
-                cart=cart,
-                item=item,
-                pricing_tier=pricing_tier,
-                pack_quantity=pack_quantity,
-                unit_type=unit_type,
-                user_exclusive_price=UserExclusivePrice.objects.filter(
-                    id=user_exclusive_price_id,
-                    user=cart.user,
-                    item=item
-                ).first() if user_exclusive_price_id else None
-            )
-            cart_item.full_clean()
-            cart_item.save()
-            serializer = CartItemDetailSerializer(cart_item, context=serializer_context)
 
+        # Create or update cart item
+        cart_item = CartItem(
+            cart=cart,
+            item=item,
+            pricing_tier=new_pricing_tier,
+            pack_quantity=total_pack_quantity,
+            unit_type=target_unit_type,
+            user_exclusive_price=UserExclusivePrice.objects.filter(
+                id=user_exclusive_price_id,
+                user=cart.user,
+                item=item
+            ).first() if user_exclusive_price_id else None
+        )
+        cart_item.full_clean()
+        cart_item.save()
+
+        print(f"[DEBUG] Created/Updated cart item: id={cart_item.id}, pack_quantity={cart_item.pack_quantity}, unit_type={cart_item.unit_type}")
+
+        serializer = CartItemDetailSerializer(cart_item, context={'request': self.request})
         return serializer.data
 
     def update(self, request, *args, **kwargs):
@@ -622,45 +624,85 @@ class CartItemViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
+
+# class OrderViewSet(viewsets.ModelViewSet):
+#     renderer_classes = [CustomRenderer]
+#     queryset = Order.objects.all()
+#     serializer_class = OrderSerializer
+#     permission_classes = [IsAuthenticated]
+#     pagination_class = StandardResultsSetPagination
+
+#     def list(self, request, *args, **kwargs):
+#         if not request.user.is_authenticated:
+#             raise PermissionDenied("Authentication required to access orders.")
+#         try:
+#             queryset = self.get_queryset()
+#             page = self.paginate_queryset(queryset)
+#             if page is not None:
+#                 serializer = self.get_serializer(page, many=True)
+#                 return self.get_paginated_response(serializer.data)
+#             serializer = self.get_serializer(queryset, many=True)
+#             return Response(serializer.data)
+#         except ValidationError as e:
+#             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+#         except Exception as e:
+#             print(e)
+#             return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+#     def get_queryset(self):
+#         if not self.request.user.is_authenticated:
+#             raise PermissionDenied("Authentication required to access orders.")
+#         return self.queryset.filter(user=self.request.user).order_by('-created_at')
+
+#     def create(self, request, *args, **kwargs):
+#         if not request.user.is_authenticated:
+#             raise PermissionDenied("Authentication required to create an order.")
+#         serializer = self.get_serializer(data=request.data, context={'request': request})
+#         serializer.is_valid(raise_exception=True)
+#         self.perform_create(serializer)
+#         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+#     def perform_create(self, serializer):
+#         serializer.save(user=self.request.user)
+
 class OrderViewSet(viewsets.ModelViewSet):
-    renderer_classes = [CustomRenderer]
-    queryset = Order.objects.all()
+    queryset = Order.objects.all().order_by('-created_at')
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
-    pagination_class = StandardResultsSetPagination
-
-    def list(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            raise PermissionDenied("Authentication required to access orders.")
-        try:
-            queryset = self.get_queryset()
-            page = self.paginate_queryset(queryset)
-            if page is not None:
-                serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
-            serializer = self.get_serializer(queryset, many=True)
-            return Response(serializer.data)
-        except ValidationError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            print(e)
-            return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get_queryset(self):
-        if not self.request.user.is_authenticated:
-            raise PermissionDenied("Authentication required to access orders.")
-        return self.queryset.filter(user=self.request.user).order_by('-created_at')
-
-    def create(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            raise PermissionDenied("Authentication required to create an order.")
-        serializer = self.get_serializer(data=request.data, context={'request': request})
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Order.objects.filter(user=self.request.user).order_by('-created_at')
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        try:
+            with transaction.atomic():
+                order = serializer.save(user=self.request.user)
+                if order.payment_method == 'stripe' and order.transaction_id:
+                    _transaction = Transaction.objects.create(
+                        order=order,
+                        stripe_payment_intent_id=order.transaction_id,
+                        amount=order.calculate_total(),
+                        currency='gbp',
+                        status='succeeded' if order.payment_status == 'COMPLETED' else 'pending'
+                    )
+                    logger.info(f"Transaction {_transaction.stripe_payment_intent_id} created for order {order.id}")
+                order.generate_and_save_pdfs()
+                logger.info(f"Order {order.id} created successfully for user {self.request.user.id}")
+        except Exception as e:
+            logger.error(f"Error creating order for user {self.request.user.id}: {str(e)}")
+            raise
+
+    def perform_update(self, serializer):
+        try:
+            with transaction.atomic():
+                order = serializer.save()
+                order.generate_and_save_pdfs()
+                order.generate_and_save_payment_receipts()
+                logger.info(f"Order {order.id} updated successfully")
+        except Exception as e:
+            logger.error(f"Error updating order {order.id}: {str(e)}")
+            raise
+
 
 class OrderItemViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
@@ -799,6 +841,8 @@ class AddressViewSet(viewsets.ModelViewSet):
     renderer_classes = [CustomRenderer]
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
+    serializer_class = AddressSerializer
+    queryset = Address.objects.all()
 
     def get_queryset(self):
         model = self.serializer_class.Meta.model
@@ -807,14 +851,42 @@ class AddressViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-class ShippingAddressViewSet(AddressViewSet):
-    renderer_classes = [CustomRenderer]
-    serializer_class = ShippingAddressSerializer
-    queryset = ShippingAddress.objects.all()
-    pagination_class = StandardResultsSetPagination
+class CreatePaymentIntentView(APIView):
+    permission_classes = [IsAuthenticated]
 
-class BillingAddressViewSet(AddressViewSet):
-    renderer_classes = [CustomRenderer]
-    serializer_class = BillingAddressSerializer
-    queryset = BillingAddress.objects.all()
-    pagination_class = StandardResultsSetPagination
+    def post(self, request):
+        try:
+            cart_id = request.data.get('cart_id')
+            if not cart_id:
+                return Response({'error': 'Cart ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Fetch the cart for the authenticated user
+            cart = Cart.objects.get(id=cart_id, user=request.user)
+            
+            # Check if the cart has items
+            if not cart.items.exists():
+                return Response({'error': 'Cart is empty'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Calculate total amount using Cart.calculate_total() (in pounds, convert to pence for Stripe)
+            total_amount = int(float(cart.calculate_total()) * 100)  # Convert pounds to pence
+
+            if total_amount <= 0:
+                return Response({'error': 'Cart total must be greater than zero'}, status=status.HTTP_400_BAD_REQUEST)
+
+            print('total_amount: ', total_amount)
+            print('cart.calculate_total(): ', cart.calculate_total())
+            # Create Stripe PaymentIntent
+            intent = stripe.PaymentIntent.create(
+                amount=total_amount,
+                currency='gbp',
+                automatic_payment_methods={'enabled': True},
+                metadata={'cart_id': cart_id}
+            )
+
+            return Response({'client_secret': intent.client_secret}, status=status.HTTP_200_OK)
+        except Cart.DoesNotExist:
+            return Response({'error': 'Cart not found'}, status=status.HTTP_404_NOT_FOUND)
+        except stripe.error.StripeError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'Error creating PaymentIntent: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

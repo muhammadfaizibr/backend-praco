@@ -23,7 +23,6 @@ from datetime import timedelta
 from io import BytesIO
 from phonenumber_field.modelfields import PhoneNumberField
 from backend_praco.utils import send_email
-import math
 from django.db.models import Sum 
 
 class Category(models.Model):
@@ -417,7 +416,7 @@ class PricingTierData(models.Model):
     """
     item = models.ForeignKey('Item', on_delete=models.CASCADE, related_name='pricing_tier_data')
     pricing_tier = models.ForeignKey(PricingTier, on_delete=models.CASCADE, related_name='pricing_data')
-    price = models.DecimalField(max_digits=12, decimal_places=2, help_text="Price per unit")
+    price = models.DecimalField(max_digits=12, decimal_places=8, help_text="Price per unit")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -623,9 +622,9 @@ class Item(models.Model):
             # Category-based validation for dimensions
             required_categories = ['box', 'boxes', 'postal', 'postals', 'bag', 'bags']
             if category_name in required_categories:
-                if self.height is None or self.height < 0:
+                if self.height is None or self.height <= 0:
                     errors['height'] = "Height must be a positive number for this category."
-                if self.width is None or self.width < 0:
+                if self.width is None or self.width <= 0:
                     errors['width'] = "Width must be a positive number for this category."
                 if self.length is None or self.length < 0:
                     errors['length'] = "Length must be a positive number for this category."
@@ -873,7 +872,7 @@ class CartItem(models.Model):
         max_length=10,
         choices=(('pack', 'Pack'), ('pallet', 'Pallet')),
         default='pack',
-        help_text="Unit type for this cart item."
+        help_text="Unit type for pricing tier selection."
     )
     user_exclusive_price = models.ForeignKey('UserExclusivePrice', on_delete=models.SET_NULL, null=True, blank=True,
                                           related_name='cartitem_items')
@@ -892,46 +891,49 @@ class CartItem(models.Model):
 
     def convert_weight_to_kg(self, weight, weight_unit):
         if weight is None or weight_unit is None:
-            return Decimal('0.00')
+            return Decimal('0.00000000')
         weight = Decimal(str(weight))
         if weight_unit == 'lb':
-            return (weight * Decimal('0.453592')).quantize(Decimal('0.01'))
+            return (weight * Decimal('0.453592')).quantize(Decimal('0.00000001'))
         elif weight_unit == 'oz':
-            return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'))
+            return (weight * Decimal('0.0283495')).quantize(Decimal('0.00000001'))
         elif weight_unit == 'g':
-            return (weight * Decimal('0.001')).quantize(Decimal('0.01'))
+            return (weight * Decimal('0.001')).quantize(Decimal('0.00000001'))
         elif weight_unit == 'kg':
-            return weight.quantize(Decimal('0.01'))
-        return Decimal('0.00')
+            return weight.quantize(Decimal('0.00000001'))
+        return Decimal('0.00000000')
 
     @property
     def total_units(self):
         if not self.item:
             return 0
         units_per_pack = self.item.units_per_pack or 1
-        return self.pack_quantity * units_per_pack
+        total = self.pack_quantity * units_per_pack
+        return total
 
     @property
     def total_weight_kg(self):
         if not self.item:
-            return Decimal('0.00')
+            return Decimal('0.00000000')
         item_weight_kg = self.convert_weight_to_kg(self.item.weight, self.item.weight_unit)
-        return (item_weight_kg * Decimal(self.total_units)).quantize(Decimal('0.01'))
+        total = (item_weight_kg * Decimal(self.total_units)).quantize(Decimal('0.00000001'))
+        return total
 
     def get_appropriate_pricing_tier(self):
         from .models import PricingTier
         quantity = self.pack_quantity
-        return PricingTier.get_appropriate_tier(
+        tier = PricingTier.get_appropriate_tier(
             product_variant=self.item.product_variant,
             quantity=quantity,
             tier_type=self.unit_type
         )
+        return tier
 
     def clean(self):
         errors = {}
         
         if not self.item:
-            errors['item'] = "Please select an item forokay this cart entry."
+            errors['item'] = "Please select an item for this cart entry."
         if not self.pricing_tier:
             errors['pricing_tier'] = "Please select a pricing tier for this cart entry."
         if self.pack_quantity <= 0:
@@ -940,6 +942,8 @@ class CartItem(models.Model):
         if self.item and self.pricing_tier:
             if self.pricing_tier.product_variant != self.item.product_variant:
                 errors['pricing_tier'] = "Pricing tier must belong to the same product variant as the item."
+            if self.pricing_tier.tier_type != self.unit_type:
+                errors['unit_type'] = f"Unit type {self.unit_type} does not match pricing tier type {self.pricing_tier.tier_type}."
 
             if self.pack_quantity < self.pricing_tier.range_start:
                 errors['pack_quantity'] = (
@@ -955,7 +959,6 @@ class CartItem(models.Model):
             if self.item.track_inventory:
                 total_units = self.total_units
                 available_stock = self.item.stock
-                
                 units_per_pack = self.item.units_per_pack or 1
                 
                 existing_cart_units = CartItem.objects.filter(
@@ -999,12 +1002,7 @@ class CartItem(models.Model):
             ).exclude(pk=self.pk).first()
 
             if existing_cart_item:
-                # If pallet pricing is active, sum quantities
-                if self.unit_type == 'pallet':
-                    existing_cart_item.pack_quantity += self.pack_quantity
-                else:
-                    existing_cart_item.pack_quantity = self.pack_quantity
-                    
+                existing_cart_item.pack_quantity += self.pack_quantity
                 existing_cart_item.pricing_tier = self.pricing_tier
                 existing_cart_item.user_exclusive_price = self.user_exclusive_price
                 existing_cart_item.full_clean()
@@ -1019,7 +1017,7 @@ class CartItem(models.Model):
             try:
                 self.cart.update_cart()
                 self.cart.update_pricing_tiers()
-            except Exception:
+            except Exception as e:
                 pass
 
             return cart_item
@@ -1060,68 +1058,86 @@ class Cart(models.Model):
         return cart, created
 
     def add_or_update_item(self, item_data):
+        from .models import PricingTier
         item_id = item_data['item'].id
-        pricing_tier = item_data.get('pricing_tier')
-        unit_type = item_data.get('unit_type', 'pack')
         pack_quantity = item_data.get('pack_quantity', 0)
-        
-        # Check if item exists in any unit_type
-        existing_items = self.items.filter(item_id=item_id)
-        
-        if existing_items.exists():
-            # Check if we're switching from pack to pallet pricing
-            existing_pack_item = existing_items.filter(unit_type='pack').first()
-            existing_pallet_item = existing_items.filter(unit_type='pallet').first()
+        unit_type = item_data.get('unit_type', 'pack')
+        units_per_pack = item_data['item'].units_per_pack or 1
+
+        with transaction.atomic():
+            # Calculate total weight including the new item
+            new_units = pack_quantity * units_per_pack
+            new_weight = self.convert_weight_to_kg(
+                item_data['item'].weight * new_units,
+                item_data['item'].weight_unit
+            )
+            current_weight = sum(item.total_weight_kg for item in self.items.exclude(item_id=item_id))
+            total_weight = current_weight + new_weight
+
+            # Determine pricing tier type
+            has_pallet_pricing = item_data['item'].product_variant.pricing_tiers.filter(
+                tier_type='pallet'
+            ).exists()
+            target_unit_type = 'pallet' if total_weight >= Decimal('750.00000000') and has_pallet_pricing else 'pack'
+
+            # Sum existing and new pack quantities
+            existing_items = self.items.filter(item_id=item_id)
+            total_pack_quantity = pack_quantity
+            for existing_item in existing_items:
+                total_pack_quantity += existing_item.pack_quantity
+                existing_item.delete()  # Consolidate into one item
+
+            # Find appropriate pricing tier
+            new_pricing_tier = PricingTier.get_appropriate_tier(
+                product_variant=item_data['item'].product_variant,
+                quantity=total_pack_quantity,
+                tier_type=target_unit_type
+            )
+
+            if not new_pricing_tier:
+                new_pricing_tier = item_data['item'].product_variant.pricing_tiers.filter(
+                    tier_type=target_unit_type
+                ).order_by('-range_start').first()
+
+            if not new_pricing_tier:
+                raise ValidationError(f"No suitable {target_unit_type} pricing tier found for quantity {total_pack_quantity}.")
             
-            if unit_type == 'pallet' and existing_pack_item:
-                # Convert existing pack quantity to pallet equivalent
-                units_per_pallet = existing_pack_item.item.units_per_pack or 1
-                pallet_quantity = math.ceil(existing_pack_item.pack_quantity / units_per_pallet)
-                
-                # Sum with new pallet quantity
-                total_pallet_quantity = pallet_quantity + pack_quantity
-                
-                # Delete the old pack item
-                existing_pack_item.delete()
-                
-                # Create new pallet item
-                new_item = self.items.create(
-                    item=item_data['item'],
-                    pricing_tier=pricing_tier,
-                    pack_quantity=total_pallet_quantity,
-                    unit_type='pallet',
-                    user_exclusive_price=item_data.get('user_exclusive_price')
-                )
-                self.update_pricing_tiers()
-                return new_item
-            elif existing_pallet_item and unit_type == 'pallet':
-                # Just add to existing pallet quantity
-                existing_pallet_item.pack_quantity += pack_quantity
-                existing_pallet_item.pricing_tier = pricing_tier
-                existing_pallet_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_pallet_item.user_exclusive_price)
-                existing_pallet_item.full_clean()
-                existing_pallet_item.save()
-                self.update_pricing_tiers()
-                return existing_pallet_item
-            else:
-                # Default behavior for pack items
-                existing_item = existing_items.first()
-                existing_item.pack_quantity = pack_quantity
-                existing_item.pricing_tier = pricing_tier
-                existing_item.user_exclusive_price = item_data.get('user_exclusive_price', existing_item.user_exclusive_price)
-                existing_item.full_clean()
-                existing_item.save()
-                self.update_pricing_tiers()
-                return existing_item
-        else:
-            if unit_type == 'pack' and not pricing_tier.no_end_range and pack_quantity > pricing_tier.range_end:
-                raise ValidationError(
-                    f"Pack quantity {pack_quantity} exceeds "
-                    f"the pricing tier range {pricing_tier.range_start}-{pricing_tier.range_end}."
-                )
-            new_item = self.items.create(**item_data)
+            # Validate inventory if needed
+            if item_data['item'].track_inventory:
+                total_units = total_pack_quantity * units_per_pack
+                available_stock = item_data['item'].stock or 0
+                if total_units > available_stock:
+                    raise ValidationError(
+                        f"Insufficient stock for {item_data['item'].sku}. "
+                        f"Total available: {available_stock} units, "
+                        f"Requested: {total_units} units."
+                    )
+
+            # Create new cart item with total pack quantity
+            cart_item = self.items.create(
+                item=item_data['item'],
+                pricing_tier=new_pricing_tier,
+                pack_quantity=total_pack_quantity,
+                unit_type=target_unit_type,
+                user_exclusive_price=item_data.get('user_exclusive_price')
+            )
+
             self.update_pricing_tiers()
-            return new_item
+            return cart_item
+
+    def convert_weight_to_kg(self, weight, weight_unit):
+        if weight is None or weight_unit is None:
+            return Decimal('0.00000000')
+        weight = Decimal(str(weight))
+        if weight_unit == 'lb':
+            return (weight * Decimal('0.453592')).quantize(Decimal('0.00000001'))
+        elif weight_unit == 'oz':
+            return (weight * Decimal('0.0283495')).quantize(Decimal('0.00000001'))
+        elif weight_unit == 'g':
+            return (weight * Decimal('0.001')).quantize(Decimal('0.00000001'))
+        elif weight_unit == 'kg':
+            return weight.quantize(Decimal('0.00000001'))
+        return Decimal('0.00000000')
 
     def calculate_subtotal(self):
         total = Decimal('0.00')
@@ -1148,21 +1164,16 @@ class Cart(models.Model):
         return total_units, total_packs
 
     def calculate_total_weight(self):
-        total_weight = Decimal('0.00')
+        total_weight = Decimal('0.00000000')
         for item in self.items.all():
             total_weight += item.total_weight_kg
-        return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return total_weight.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP)
 
     def calculate_total(self):
         subtotal = self.calculate_subtotal()
-        if subtotal > 600:
-            self.discount = Decimal('10.00')
-        else:
-            self.discount = Decimal('0.00')
-        discount_amount = (subtotal * self.discount) / Decimal('100.00')
-        discounted_subtotal = subtotal - discount_amount
-        vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
-        total = discounted_subtotal + vat_amount
+        vat_amount = (subtotal * self.vat) / Decimal('100.00')
+        total = subtotal + vat_amount
+        print(total, 'total')
         return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     
     def update_cart(self):
@@ -1171,53 +1182,37 @@ class Cart(models.Model):
     def update_pricing_tiers(self):
         from .models import PricingTier
         total_weight = self.calculate_total_weight()
-        use_pallet_pricing = total_weight >= Decimal('750.00')
+        use_pallet_pricing = total_weight >= Decimal('750.00000000')
 
         with transaction.atomic():
             for item in self.items.select_for_update():
-                variant = item.item.product_variant
-                if not variant:
+                if not item.item or not item.item.product_variant:
                     continue
 
+                variant = item.item.product_variant
                 has_pallet_pricing = variant.pricing_tiers.filter(
                     tier_type='pallet'
                 ).exists()
 
                 new_pricing_tier = None
-                new_unit_type = item.unit_type
+                new_unit_type = 'pack' if not (use_pallet_pricing and has_pallet_pricing) else 'pallet'
+                pack_quantity = item.pack_quantity
 
-                if use_pallet_pricing and has_pallet_pricing:
-                    pallet_tiers = variant.pricing_tiers.filter(
-                        tier_type='pallet'
-                    ).order_by('range_start')
-                    units_per_pallet = item.item.units_per_pack or 1
-                    pallet_quantity = math.ceil(item.pack_quantity / units_per_pallet)
+                tiers = variant.pricing_tiers.filter(
+                    tier_type=new_unit_type
+                ).order_by('range_start')
 
-                    for tier in pallet_tiers:
-                        if pallet_quantity >= tier.range_start and (
-                            tier.no_end_range or pallet_quantity <= tier.range_end
-                        ):
-                            new_pricing_tier = tier
-                            new_unit_type = 'pallet'
-                            break
-                    if not new_pricing_tier:
-                        new_pricing_tier = pallet_tiers.last()
-                        new_unit_type = 'pallet'
-                else:
-                    pack_tiers = variant.pricing_tiers.filter(
-                        tier_type='pack'
-                    ).order_by('range_start')
+                for tier in tiers:
+                    if pack_quantity >= tier.range_start and (
+                        tier.no_end_range or pack_quantity <= tier.range_end
+                    ):
+                        new_pricing_tier = tier
+                        break
+                if not new_pricing_tier:
+                    new_pricing_tier = tiers.last()
 
-                    for tier in pack_tiers:
-                        if item.pack_quantity >= tier.range_start and (
-                            tier.no_end_range or item.pack_quantity <= tier.range_end
-                        ):
-                            new_pricing_tier = tier
-                            new_unit_type = 'pack'
-                            break
-                    if not new_pricing_tier:
-                        new_pricing_tier = pack_tiers.last()
-                        new_unit_type = 'pack'
+                if not new_pricing_tier:
+                    continue
 
                 if new_pricing_tier and (item.pricing_tier != new_pricing_tier or item.unit_type != new_unit_type):
                     item.pricing_tier = new_pricing_tier
@@ -1246,8 +1241,8 @@ def create_user_cart(sender, instance, created, **kwargs):
         Cart.objects.get_or_create(user=instance)
 
 
-class ShippingAddress(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='shipping_addresses')
+class Address(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='addresses')
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     telephone_number = PhoneNumberField()
@@ -1260,26 +1255,9 @@ class ShippingAddress(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'shipping address'
-        verbose_name_plural = 'shipping addresses'
+        verbose_name = 'address'
+        verbose_name_plural = 'addresses'
 
-class BillingAddress(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='billing_addresses')
-    first_name = models.CharField(max_length=100)
-    last_name = models.CharField(max_length=100)
-    telephone_number = PhoneNumberField()
-    street = models.CharField(max_length=255)
-    city = models.CharField(max_length=100)
-    state = models.CharField(max_length=100, blank=True)
-    postal_code = models.CharField(max_length=20)
-    country = models.CharField(max_length=100)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        verbose_name = 'billing address'
-        verbose_name_plural = 'billing addresses'
-        
 logger = logging.getLogger(__name__)
 
 class HRFlowable(Flowable):
@@ -1298,6 +1276,1786 @@ class HRFlowable(Flowable):
         self.canv.setStrokeColor(self.color)
         self.canv.line(0, 0, self.width, 0)
 
+
+class Transaction(models.Model):
+    order = models.ForeignKey('Order', on_delete=models.CASCADE, related_name='transactions')
+    stripe_payment_intent_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3, default='gbp')
+    status = models.CharField(max_length=20, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'transaction'
+        verbose_name_plural = 'transactions'
+
+    def __str__(self):
+        return f"Transaction {self.stripe_payment_intent_id} for Order {self.order.id}"
+
+# class Order(models.Model):
+#     STATUS_CHOICES = (
+#         ('PENDING', 'Pending'),
+#         ('PROCESSING', 'Processing'),
+#         ('SHIPPED', 'Shipped'),
+#         ('DELIVERED', 'Delivered'),
+#         ('CANCELLED', 'Cancelled'),
+#         ('RETURNED', 'Returned'),
+#     )
+#     PAYMENT_STATUS_CHOICES = (
+#         ('PENDING', 'Pending'),
+#         ('COMPLETED', 'Completed'),
+#         ('FAILED', 'Failed'),
+#         ('REFUND', 'Refund'),
+#     )
+#     PAYMENT_METHOD_CHOICES = (
+#         ('manual_payment', 'Manual Payment'),
+#     )
+
+#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+#     shipping_address = models.ForeignKey('ShippingAddress', on_delete=models.SET_NULL, null=True)
+#     billing_address = models.ForeignKey('BillingAddress', on_delete=models.SET_NULL, null=True)
+#     shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, editable=False)
+#     vat = models.DecimalField(
+#         max_digits=5,
+#         decimal_places=2,
+#         default=Decimal('20.00'),
+#         help_text="VAT percentage (e.g., 20 for 20%)."
+#     )
+#     discount = models.DecimalField(
+#         max_digits=5,
+#         decimal_places=2,
+#         default=Decimal('0.00'),
+#         help_text="Discount percentage (e.g., 10 for 10%)."
+#     )
+#     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+#     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='PENDING')
+#     payment_verified = models.BooleanField(default=False)
+#     payment_method = models.CharField(
+#         max_length=50,
+#         choices=PAYMENT_METHOD_CHOICES,
+#         default='manual_payment',
+#         editable=False
+#     )
+#     transaction_id = models.CharField(max_length=100, blank=True, null=True)
+#     payment_receipt = models.FileField(upload_to='receipts/', blank=True, null=True)
+#     refund_transaction_id = models.CharField(max_length=100, blank=True, null=True)
+#     refund_payment_receipt = models.FileField(upload_to='refund_receipts/', blank=True, null=True)
+#     paid_receipt = models.FileField(upload_to='paid_receipts/', blank=True, null=True, editable=False)
+#     refund_receipt = models.FileField(upload_to='refund_receipts/', blank=True, null=True, editable=False)
+#     invoice = models.FileField(upload_to='invoices/', null=True, blank=True, editable=False)
+#     delivery_note = models.FileField(upload_to='delivery_notes/', null=True, blank=True, editable=False)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+
+#     class Meta:
+#         indexes = [
+#             models.Index(fields=['user']),
+#             models.Index(fields=['created_at']),
+#         ]
+#         verbose_name = 'order'
+#         verbose_name_plural = 'orders'
+
+#     def clean(self):
+#         errors = {}
+#         if self.payment_verified:
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment is verified.'
+#             if self.payment_status in ['FAILED', 'PENDING']:
+#                 errors['payment_status'] = 'Payment status must be Completed/Refunded when payment is verified.'
+        
+#         if self.payment_status == 'COMPLETED':
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
+        
+#         elif self.payment_status == 'REFUND':
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
+#             if not self.refund_transaction_id:
+#                 errors['refund_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
+#             if not self.refund_payment_receipt:
+#                 errors['refund_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
+
+#         for field, field_name in [(self.payment_receipt, 'payment_receipt'), (self.refund_payment_receipt, 'refund_payment_receipt')]:
+#             if field:
+#                 ext = field.name.lower().split('.')[-1]
+#                 if ext not in ['png', 'jpg', 'jpeg', 'pdf']:
+#                     errors[field_name] = 'File must be a PNG, JPG, or PDF.'
+
+#         if errors:
+#             raise ValidationError(errors)
+
+#         if self.payment_status == 'REFUND' and not self.paid_receipt:
+#             raise ValidationError({'__all__': 'Paid receipt must exist when payment status is Refunded.'})
+
+#     def calculate_subtotal(self):
+#         """Calculate the overall subtotal by summing the totals of all OrderItems after UserExclusivePrice discounts."""
+#         try:
+#             total = Decimal('0.00')
+#             for item in self.items.all():
+#                 item_subtotal = item.calculate_subtotal()
+#                 total += item_subtotal
+#             logger.info(f"Order {self.id} subtotal: {total}")
+#             return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating subtotal for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_original_subtotal(self):
+#         """Calculate the overall subtotal after UserExclusivePrice discounts (same as calculate_subtotal)."""
+#         try:
+#             total = self.calculate_subtotal()
+#             logger.info(f"Order {self.id} original subtotal: {total}")
+#             return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating original subtotal for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_total(self):
+#         """
+#         Calculate the overall total:
+#         1. Start with overall subtotal (sum of item totals after UserExclusivePrice discounts).
+#         2. Apply order-level discount.
+#         3. Add VAT (e.g., 20% of discounted subtotal).
+#         4. Add shipping cost.
+#         """
+#         try:
+#             subtotal = self.calculate_subtotal()  # After UserExclusivePrice discounts
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             shipping_cost = Decimal(str(self.shipping_cost)).quantize(Decimal('0.01'))
+#             total = (discounted_subtotal + vat_amount + shipping_cost).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#             logger.info(f"Order {self.id} total: {total} (subtotal={subtotal}, discount={self.discount}%, vat={self.vat}%, shipping={shipping_cost})")
+#             return total
+#         except Exception as e:
+#             logger.error(f"Error calculating total for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_total_weight(self):
+#         """Calculate the total weight of all OrderItems."""
+#         try:
+#             total_weight = Decimal('0.00000000')
+#             for item in self.items.all():
+#                 item_weight_kg = item.calculate_weight()
+#                 total_units = item.total_units
+#                 total_weight += item_weight_kg * Decimal(total_units)
+#             logger.info(f"Order {self.id} total weight: {total_weight}")
+#             return total_weight.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating total weight for order {self.id}: {str(e)}")
+#             return Decimal('0.00000000')
+
+#     def calculate_total_units_and_packs(self):
+#         """Calculate total units and packs across all OrderItems."""
+#         try:
+#             total_units = 0
+#             total_packs = 0
+#             for item in self.items.all():
+#                 units_per_pack = item.item.units_per_pack or 1
+#                 total_units += item.pack_quantity * units_per_pack
+#                 total_packs += item.pack_quantity
+#             logger.info(f"Order {self.id} total units: {total_units}, total packs: {total_packs}")
+#             return total_units, total_packs
+#         except Exception as e:
+#             logger.error(f"Error calculating units and packs for order {self.id}: {str(e)}")
+#             return 0, 0
+
+#     def update_order(self):
+#         """Update order calculations."""
+#         try:
+#             self.calculate_total()
+#             super().save(update_fields=['discount'])
+#             logger.info(f"Updated order {self.id} calculations")
+#         except Exception as e:
+#             logger.error(f"Error updating order {self.id}: {str(e)}")
+
+#     def generate_invoice_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             small_style = ParagraphStyle(name='Small', fontName='Helvetica', fontSize=8)
+
+#             elements.append(Paragraph(f"Invoice #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             shipping = self.shipping_address
+#             billing = self.billing_address
+#             shipping_address = billing_address = "N/A"
+#             shipping_telephone = billing_telephone = "N/A"
+#             if shipping:
+#                 shipping_address = f"{shipping.first_name} {shipping.last_name}<br/>{shipping.street}<br/>{shipping.city}, {shipping.state} {shipping.postal_code}<br/>{shipping.country}"
+#                 shipping_telephone = shipping.telephone_number or "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style), Paragraph("Ship To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style), Paragraph(shipping_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style), Paragraph(f"Tel: {shipping_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[8*cm, 8*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             total_weight = self.calculate_total_weight()
+#             due_date = self.created_at + timedelta(days=14)
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Due Date:", bold_style), Paragraph(due_date.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
+#                 [Paragraph("Total Due:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+#             ]
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items: {items_exist}")
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"€{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             # item.item.title[:18] if item.item.title else "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"€{unit_price:.2f}",
+#                             f"€{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for invoice: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+#             else:
+#                 logger.warning(f"No items found for order {self.id}")
+#                 data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"€{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"€{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             notes = Paragraph(
+#                 "Notes: 7-day exchange or refund policy for damaged goods. Contact us within 7 days for assistance. A 3% fee applies to cash payments.",
+#                 small_style
+#             )
+#             elements.append(notes)
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated invoice PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating invoice PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_delivery_note_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             small_style = ParagraphStyle(name='Small', fontName='Helvetica', fontSize=8)
+
+#             elements.append(Paragraph(f"Delivery Note #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             shipping = self.shipping_address
+#             shipping_address = "N/A"
+#             shipping_telephone = "N/A"
+#             if shipping:
+#                 shipping_address = f"{shipping.first_name} {shipping.last_name}<br/>{shipping.street}<br/>{shipping.city}, {shipping.state} {shipping.postal_code}<br/>{shipping.country}"
+#                 shipping_telephone = shipping.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Ship To:", bold_style)],
+#                 [Paragraph(shipping_address, normal_style)],
+#                 [Paragraph(f"Tel: {shipping_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             total_weight = self.calculate_total_weight()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
+#             ]
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Total Units']]
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items for delivery note: {items_exist}")
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             # item.item.title[:18] if item.item.title else "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             str(item.total_units)
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for delivery note: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "0"])
+#             else:
+#                 logger.warning(f"No items found for order {self.id}")
+#                 data.append(["N/A", "No items available", "0", "0", "0"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 5*cm, 2*cm, 2*cm, 3*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated delivery note PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating delivery note PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_paid_receipt_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             stamp_style = ParagraphStyle(name='Stamp', fontName='Helvetica-Bold', fontSize=24, textColor=colors.green)
+
+#             elements.append(Paragraph("PAID", stamp_style))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(Paragraph(f"Paid Receipt #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             billing = self.billing_address
+#             billing_address = "N/A"
+#             billing_telephone = "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             payment_receipt_link = self.payment_receipt.url if self.payment_receipt else "N/A"
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Transaction ID:", bold_style), Paragraph(self.transaction_id or "N/A", normal_style)],
+#                 [Paragraph("Payment Receipt:", bold_style), Paragraph(f'<a href="{payment_receipt_link}">View Receipt</a>', orange_style)],
+#                 [Paragraph("Total Paid:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+#             ]
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"€{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             # item.item.title[:18] if item.item.title else "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"€{unit_price:.2f}",
+#                             f"€{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for paid receipt: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+#             else:
+#                 data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"€{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"€{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated paid receipt PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating paid receipt PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_refund_receipt_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             stamp_style = ParagraphStyle(name='Stamp', fontName='Helvetica-Bold', fontSize=24, textColor=colors.red)
+
+#             elements.append(Paragraph("REFUND", stamp_style))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(Paragraph(f"Refund Receipt #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             billing = self.billing_address
+#             billing_address = "N/A"
+#             billing_telephone = "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+#             refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_payment_receipt else "N/A"
+
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Refund Transaction ID:", bold_style), Paragraph(self.refund_transaction_id or "N/A", normal_style)],
+#                 [Paragraph("Refund Payment Receipt:", bold_style), Paragraph(f'<a href="{refund_payment_receipt_link}">View Receipt</a>', orange_style)],
+#                 [Paragraph("Total Refund:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+#             ]
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"€{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             item.item.title[:18] if item.item.title else "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"€{unit_price:.2f}",
+#                             f"€{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for refund receipt: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+#             else:
+#                 data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"€{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"€{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated refund receipt PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating refund receipt PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_and_save_pdfs(self):
+#         try:
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items: {items_exist}")
+#             if not items_exist:
+#                 logger.warning(f"Skipping PDF generation for order {self.id} due to no items")
+#                 return
+
+#             self.update_order()
+
+#             if not self.invoice:
+#                 invoice_buffer = self.generate_invoice_pdf()
+#                 if invoice_buffer:
+#                     self.invoice.save(
+#                         f'invoice_order_{self.id}.pdf',
+#                         ContentFile(invoice_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     invoice_buffer.close()
+#                     logger.info(f"Invoice PDF generated and saved for order {self.id} at {self.invoice.path}")
+#                 else:
+#                     logger.error(f"Invoice PDF generation failed for order {self.id}")
+
+#             if not self.delivery_note:
+#                 delivery_note_buffer = self.generate_delivery_note_pdf()
+#                 if delivery_note_buffer:
+#                     self.delivery_note.save(
+#                         f'delivery_note_order_{self.id}.pdf',
+#                         ContentFile(delivery_note_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     delivery_note_buffer.close()
+#                     logger.info(f"Delivery note PDF generated and saved for order {self.id} at {self.delivery_note.path}")
+#                 else:
+#                     logger.error(f"Delivery note PDF generation failed for order {self.id}")
+
+#             super(Order, self).save(update_fields=['invoice', 'delivery_note', 'discount'])
+#             logger.info(f"Order {self.id} saved with updated invoice, delivery note, and discount fields")
+#         except Exception as e:
+#             logger.error(f"Error generating and saving PDFs for order {self.id}: {str(e)}")
+#             raise
+
+#     def generate_and_save_payment_receipts(self):
+#         try:
+#             update_fields = []
+#             if self.payment_verified and self.payment_status == 'COMPLETED' and not self.paid_receipt:
+#                 if not self.transaction_id:
+#                     self.transaction_id = str(uuid.uuid4())
+#                     update_fields.append('transaction_id')
+#                 paid_receipt_buffer = self.generate_paid_receipt_pdf()
+#                 if paid_receipt_buffer:
+#                     self.paid_receipt.save(
+#                         f'paid_receipt_order_{self.id}.pdf',
+#                         ContentFile(paid_receipt_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     paid_receipt_buffer.close()
+#                     update_fields.append('paid_receipt')
+#                     logger.info(f"Paid receipt PDF generated and saved for order {self.id} at {self.paid_receipt.path}")
+#                 else:
+#                     logger.error(f"Paid receipt PDF generation failed for order {self.id}")
+
+#             if self.payment_status == 'REFUND' and self.transaction_id and self.payment_receipt and self.refund_transaction_id and self.refund_payment_receipt and self.paid_receipt and not self.refund_receipt:
+#                 refund_receipt_buffer = self.generate_refund_receipt_pdf()
+#                 if refund_receipt_buffer:
+#                     self.refund_receipt.save(
+#                         f'refund_receipt_order_{self.id}.pdf',
+#                         ContentFile(refund_receipt_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     refund_receipt_buffer.close()
+#                     update_fields.append('refund_receipt')
+#                     logger.info(f"Refund receipt PDF generated and saved for order {self.id} at {self.refund_receipt.path}")
+#                 else:
+#                     logger.error(f"Refund receipt PDF generation failed for order {self.id}")
+
+#             if update_fields:
+#                 super(Order, self).save(update_fields=update_fields)
+#                 logger.info(f"Order {self.id} saved with updated receipt fields: {update_fields}")
+#         except Exception as e:
+#             logger.error(f"Error generating and saving payment receipts for order {self.id}: {str(e)}")
+#             raise
+
+#     def save(self, *args, **kwargs):
+#         self.full_clean()
+#         super().save(*args, **kwargs)
+#         update_fields = kwargs.get('update_fields', [])
+#         if self.items.exists() and not any(field in update_fields for field in ['invoice', 'delivery_note', 'discount', 'paid_receipt', 'refund_receipt']):
+#             self.update_order()
+#             self.generate_and_save_pdfs()
+#             if self.payment_verified or self.payment_status in ['COMPLETED', 'REFUND']:
+#                 self.generate_and_save_payment_receipts()
+
+#     def update_order_items(self, new_item):
+#         """Update order with a new or existing item."""
+#         try:
+#             OrderItem.objects.create(
+#                 order=self,
+#                 item=new_item['item'],
+#                 pricing_tier=new_item.get('pricing_tier'),
+#                 pack_quantity=new_item.get('pack_quantity', 1),
+#                 unit_type=new_item.get('unit_type', 'pack'),
+#                 user_exclusive_price=new_item.get('user_exclusive_price')
+#             )
+#             self.update_order()
+#             for field in ['invoice', 'delivery_note', 'paid_receipt', 'refund_receipt']:
+#                 file_field = getattr(self, field)
+#                 if file_field:
+#                     file_field.delete(save=False)
+#             self.generate_and_save_pdfs()
+#             if self.payment_verified or self.payment_status in ['COMPLETED', 'REFUND']:
+#                 self.generate_and_save_payment_receipts()
+#             logger.info(f"Updated order {self.id} with new item")
+#         except Exception as e:
+#             logger.error(f"Error updating order {self.id}: {str(e)}")
+#             raise
+
+#     def delete(self, *args, **kwargs):
+#         try:
+#             for field in ['payment_receipt', 'refund_payment_receipt', 'paid_receipt', 'refund_receipt', 'invoice', 'delivery_note']:
+#                 file_field = getattr(self, field)
+#                 if file_field:
+#                     file_field.delete(save=False)
+#                     logger.info(f"Deleted {field} for order {self.id}")
+#         except Exception as e:
+#             logger.error(f"Error deleting files for order {self.id}: {str(e)}")
+#         super().delete(*args, **kwargs)
+
+#     def __str__(self):
+#         return f"Order {self.id} - {self.status}"
+
+# class Order(models.Model):
+#     STATUS_CHOICES = (
+#         ('PENDING', 'Pending'),
+#         ('PROCESSING', 'Processing'),
+#         ('SHIPPED', 'Shipped'),
+#         ('DELIVERED', 'Delivered'),
+#         ('CANCELLED', 'Cancelled'),
+#         ('RETURNED', 'Returned'),
+#     )
+#     PAYMENT_STATUS_CHOICES = (
+#         ('PENDING', 'Pending'),
+#         ('COMPLETED', 'Completed'),
+#         ('FAILED', 'Failed'),
+#         ('REFUND', 'Refund'),
+#     )
+#     PAYMENT_METHOD_CHOICES = (
+#         ('manual_payment', 'Manual Payment'),
+#         ('stripe', 'Stripe Payment'),
+#     )
+
+#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+#     shipping_address = models.ForeignKey('ShippingAddress', on_delete=models.SET_NULL, null=True)
+#     billing_address = models.ForeignKey('BillingAddress', on_delete=models.SET_NULL, null=True)
+#     shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, editable=False)
+#     vat = models.DecimalField(
+#         max_digits=5,
+#         decimal_places=2,
+#         default=Decimal('20.00'),
+#         help_text="VAT percentage (e.g., 20 for 20%)."
+#     )
+#     discount = models.DecimalField(
+#         max_digits=5,
+#         decimal_places=2,
+#         default=Decimal('0.00'),
+#         help_text="Discount percentage (e.g., 10 for 10%)."
+#     )
+#     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+#     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='PENDING')
+#     payment_verified = models.BooleanField(default=False)
+#     payment_method = models.CharField(
+#         max_length=50,
+#         choices=PAYMENT_METHOD_CHOICES,
+#         default='manual_payment'
+#     )
+#     transaction_id = models.CharField(max_length=100, blank=True, null=True)
+#     payment_receipt = models.FileField(upload_to='receipts/', blank=True, null=True)
+#     refund_transaction_id = models.CharField(max_length=100, blank=True, null=True)
+#     refund_payment_receipt = models.FileField(upload_to='refund_receipts/', blank=True, null=True)
+#     paid_receipt = models.FileField(upload_to='paid_receipts/', blank=True, null=True, editable=False)
+#     refund_receipt = models.FileField(upload_to='refund_receipts/', blank=True, null=True, editable=False)
+#     invoice = models.FileField(upload_to='invoices/', null=True, blank=True, editable=False)
+#     delivery_note = models.FileField(upload_to='delivery_notes/', null=True, blank=True, editable=False)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+
+#     class Meta:
+#         indexes = [
+#             models.Index(fields=['user']),
+#             models.Index(fields=['created_at']),
+#         ]
+#         verbose_name = 'order'
+#         verbose_name_plural = 'orders'
+
+#     def clean(self):
+#         errors = {}
+#         if self.payment_verified:
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment is verified.'
+#             if self.payment_status in ['FAILED', 'PENDING']:
+#                 errors['payment_status'] = 'Payment status must be Completed/Refunded when payment is verified.'
+        
+#         if self.payment_status == 'COMPLETED':
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
+        
+#         elif self.payment_status == 'REFUND':
+#             if not self.transaction_id:
+#                 errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
+#             if not self.payment_receipt:
+#                 errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
+#             if not self.refund_transaction_id:
+#                 errors['refund_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
+#             if not self.refund_payment_receipt:
+#                 errors['refund_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
+
+#         for field, field_name in [(self.payment_receipt, 'payment_receipt'), (self.refund_payment_receipt, 'refund_payment_receipt')]:
+#             if field:
+#                 ext = field.name.lower().split('.')[-1]
+#                 if ext not in ['png', 'jpg', 'jpeg', 'pdf']:
+#                     errors[field_name] = 'File must be a PNG, JPG, or PDF.'
+
+#         if errors:
+#             raise ValidationError(errors)
+
+#         if self.payment_status == 'REFUND' and not self.paid_receipt:
+#             raise ValidationError({'__all__': 'Paid receipt must exist when payment status is Refunded.'})
+
+#     def calculate_subtotal(self):
+#         try:
+#             total = Decimal('0.00')
+#             for item in self.items.all():
+#                 item_subtotal = item.calculate_subtotal()
+#                 total += item_subtotal
+#             logger.info(f"Order {self.id} subtotal: {total}")
+#             return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating subtotal for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_original_subtotal(self):
+#         try:
+#             total = self.calculate_subtotal()
+#             logger.info(f"Order {self.id} original subtotal: {total}")
+#             return total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating original subtotal for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_total(self):
+#         try:
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             shipping_cost = Decimal(str(self.shipping_cost)).quantize(Decimal('0.01'))
+#             total = (discounted_subtotal + vat_amount + shipping_cost).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#             logger.info(f"Order {self.id} total: {total} (subtotal={subtotal}, discount={self.discount}%, vat={self.vat}%, shipping={shipping_cost})")
+#             return total
+#         except Exception as e:
+#             logger.error(f"Error calculating total for order {self.id}: {str(e)}")
+#             return Decimal('0.00')
+
+#     def calculate_total_weight(self):
+#         try:
+#             total_weight = Decimal('0.00000000')
+#             for item in self.items.all():
+#                 item_weight_kg = item.calculate_weight()
+#                 total_units = item.total_units
+#                 total_weight += item_weight_kg * Decimal(total_units)
+#             logger.info(f"Order {self.id} total weight: {total_weight}")
+#             return total_weight.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP)
+#         except Exception as e:
+#             logger.error(f"Error calculating total weight for order {self.id}: {str(e)}")
+#             return Decimal('0.00000000')
+
+#     def calculate_total_units_and_packs(self):
+#         try:
+#             total_units = 0
+#             total_packs = 0
+#             for item in self.items.all():
+#                 units_per_pack = item.item.units_per_pack or 1
+#                 total_units += item.pack_quantity * units_per_pack
+#                 total_packs += item.pack_quantity
+#             logger.info(f"Order {self.id} total units: {total_units}, total packs: {total_packs}")
+#             return total_units, total_packs
+#         except Exception as e:
+#             logger.error(f"Error calculating units and packs for order {self.id}: {str(e)}")
+#             return 0, 0
+
+#     def update_order(self):
+#         try:
+#             self.calculate_total()
+#             super().save(update_fields=['discount'])
+#             logger.info(f"Updated order {self.id} calculations")
+#         except Exception as e:
+#             logger.error(f"Error updating order {self.id}: {str(e)}")
+
+#     def generate_invoice_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             small_style = ParagraphStyle(name='Small', fontName='Helvetica', fontSize=8)
+
+#             elements.append(Paragraph(f"Invoice #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             shipping = self.shipping_address
+#             billing = self.billing_address
+#             shipping_address = billing_address = "N/A"
+#             shipping_telephone = billing_telephone = "N/A"
+#             if shipping:
+#                 shipping_address = f"{shipping.first_name} {shipping.last_name}<br/>{shipping.street}<br/>{shipping.city}, {shipping.state} {shipping.postal_code}<br/>{shipping.country}"
+#                 shipping_telephone = shipping.telephone_number or "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style), Paragraph("Ship To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style), Paragraph(shipping_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style), Paragraph(f"Tel: {shipping_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[8*cm, 8*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             total_weight = self.calculate_total_weight()
+#             due_date = self.created_at + timedelta(days=14)
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Due Date:", bold_style), Paragraph(due_date.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
+#                 [Paragraph("Total Due:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)]
+#             ]
+#             if self.payment_method == 'stripe':
+#                 transaction = self.transactions.first()
+#                 details_data.append([Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
+#                 if transaction:
+#                     details_data.append([Paragraph("Transaction ID:", bold_style), Paragraph(transaction.stripe_payment_intent_id, normal_style)])
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items: {items_exist}")
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"£{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"£{unit_price:.2f}",
+#                             f"£{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for invoice: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
+#             else:
+#                 logger.warning(f"No items found for order {self.id}")
+#                 data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"£{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"£{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             notes = Paragraph(
+#                 "Notes: 7-day exchange or refund policy for damaged goods. Contact us within 7 days for assistance. A 3% fee applies to cash payments.",
+#                 small_style
+#             )
+#             elements.append(notes)
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated invoice PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating invoice PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_delivery_note_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             small_style = ParagraphStyle(name='Small', fontName='Helvetica', fontSize=8)
+
+#             elements.append(Paragraph(f"Delivery Note #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             shipping = self.shipping_address
+#             shipping_address = "N/A"
+#             shipping_telephone = "N/A"
+#             if shipping:
+#                 shipping_address = f"{shipping.first_name} {shipping.last_name}<br/>{shipping.street}<br/>{shipping.city}, {shipping.state} {shipping.postal_code}<br/>{shipping.country}"
+#                 shipping_telephone = shipping.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Ship To:", bold_style)],
+#                 [Paragraph(shipping_address, normal_style)],
+#                 [Paragraph(f"Tel: {shipping_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             total_weight = self.calculate_total_weight()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
+#             ]
+#             if self.payment_method == 'stripe':
+#                 transaction = self.transactions.first()
+#                 if transaction:
+#                     details_data.append([Paragraph("Transaction ID:", bold_style), Paragraph(transaction.stripe_payment_intent_id, normal_style)])
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Total Units']]
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items for delivery note: {items_exist}")
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             str(item.total_units)
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for delivery note: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0"])
+#             else:
+#                 logger.warning(f"No items found for order {self.id}")
+#                 data.append(["N/A", "No items available", "0", "0"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 5*cm, 2*cm, 2*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated delivery note PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating delivery note PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_paid_receipt_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             stamp_style = ParagraphStyle(name='Stamp', fontName='Helvetica-Bold', fontSize=24, textColor=colors.green)
+
+#             elements.append(Paragraph("PAID", stamp_style))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(Paragraph(f"Paid Receipt #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             billing = self.billing_address
+#             billing_address = "N/A"
+#             billing_telephone = "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             payment_receipt_link = self.payment_receipt.url if self.payment_receipt else "N/A"
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Transaction ID:", bold_style), Paragraph(self.transaction_id or "N/A", normal_style)],
+#                 [Paragraph("Payment Receipt:", bold_style), Paragraph(f'<a href="{payment_receipt_link}">View Receipt</a>', orange_style)],
+#                 [Paragraph("Total Paid:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)],
+#             ]
+#             if self.payment_method == 'stripe':
+#                 transaction = self.transactions.first()
+#                 if transaction:
+#                     details_data.insert(1, [Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"£{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"£{unit_price:.2f}",
+#                             f"£{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for paid receipt: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
+#             else:
+#                 data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"£{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"£{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated paid receipt PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating paid receipt PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_refund_receipt_pdf(self):
+#         try:
+#             buffer = BytesIO()
+#             doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+#             elements = []
+#             styles = getSampleStyleSheet()
+#             normal_style = styles['Normal']
+#             normal_style.fontName = 'Helvetica'
+#             normal_style.fontSize = 11
+#             bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+#             title_style = ParagraphStyle(name='Title', fontName='Helvetica-Bold', fontSize=14, textColor=colors.black)
+#             orange_style = ParagraphStyle(name='Orange', fontName='Helvetica-Bold', fontSize=12, textColor=HexColor('#F28C38'))
+#             stamp_style = ParagraphStyle(name='Stamp', fontName='Helvetica-Bold', fontSize=24, textColor=colors.red)
+
+#             elements.append(Paragraph("REFUND", stamp_style))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(Paragraph(f"Refund Receipt #{self.id}", title_style))
+#             elements.append(Spacer(1, 0.5*cm))
+#             elements.append(Paragraph("Praco Packaging Supplies Ltd.", bold_style))
+#             elements.append(Spacer(1, 0.3*cm))
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             billing = self.billing_address
+#             billing_address = "N/A"
+#             billing_telephone = "N/A"
+#             if billing:
+#                 billing_address = f"{billing.first_name} {billing.last_name}<br/>{billing.street}<br/>{billing.city}, {billing.state} {billing.postal_code}<br/>{billing.country}"
+#                 billing_telephone = billing.telephone_number or "N/A"
+#             address_data = [
+#                 [Paragraph("Bill To:", bold_style)],
+#                 [Paragraph(billing_address, normal_style)],
+#                 [Paragraph(f"Tel: {billing_telephone}", normal_style)]
+#             ]
+#             address_table = Table(address_data, colWidths=[16*cm])
+#             address_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+#             ]))
+#             elements.append(address_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_payment_receipt else "N/A"
+#             total_due = self.calculate_total()
+#             details_data = [
+#                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
+#                 [Paragraph("Refund Transaction ID:", bold_style), Paragraph(self.refund_transaction_id or "N/A", normal_style)],
+#                 [Paragraph("Refund Payment Receipt:", bold_style), Paragraph(f'<a href="{refund_payment_receipt_link}">View Receipt</a>', orange_style)],
+#                 [Paragraph("Total Refund:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)],
+#             ]
+#             if self.payment_method == 'stripe':
+#                 transaction = self.transactions.first()
+#                 if transaction:
+#                     details_data.insert(1, [Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
+#             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
+#             details_table.setStyle(TableStyle([
+#                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+#                 ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+#             ]))
+#             elements.append(details_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             data = [['SKU', 'Packs', 'Units', 'Unit Price', 'Subtotal', 'Total']]
+#             original_subtotal = Decimal('0.00')
+#             items_exist = self.items.exists()
+#             if items_exist:
+#                 for item in self.items.all():
+#                     try:
+#                         original_item_subtotal = item.calculate_original_subtotal()
+#                         item_subtotal = item.calculate_subtotal()
+#                         pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
+#                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
+#                         discount_percent = item.calculate_discount_percentage()
+#                         original_subtotal += item_subtotal
+#                         total_display = f"£{item_subtotal:.2f}"
+#                         if discount_percent > 0:
+#                             total_display += f"\n{discount_percent}% off"
+                        
+#                         units_per_pack = item.item.units_per_pack or 1
+#                         total_units = item.pack_quantity * units_per_pack
+                        
+#                         data.append([
+#                             item.item.sku or "N/A",
+#                             str(item.pack_quantity),
+#                             str(total_units),
+#                             f"£{unit_price:.2f}",
+#                             f"£{original_item_subtotal:.2f}",
+#                             total_display
+#                         ])
+#                     except Exception as e:
+#                         logger.error(f"Error processing item {item.id} for refund receipt: {str(e)}")
+#                         data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
+#             else:
+#                 data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
+            
+#             table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm])
+#             table.setStyle(TableStyle([
+#                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+#                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+#                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+#                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, 0), 11),
+#                 ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+#                 ('FONTSIZE', (0, 1), (-1, -1), 11),
+#                 ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+#                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+#                 ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+#             ]))
+#             elements.append(table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             subtotal = self.calculate_subtotal()
+#             discount_amount = (subtotal * self.discount) / Decimal('100.00')
+#             discounted_subtotal = subtotal - discount_amount
+#             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
+#             totals_data = [
+#                 ['', 'Subtotal', f"£{subtotal:.2f}"],
+#                 ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+#                 ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+#                 ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+#                 ['', 'Total', f"£{total_due:.2f}"]
+#             ]
+#             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
+#             totals_table.setStyle(TableStyle([
+#                 ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+#                 ('FONTNAME', (1, 0), (1, -1), 'Helvetica-Bold'),
+#                 ('FONTSIZE', (0, 0), (-1, -1), 11),
+#             ]))
+#             elements.append(totals_table)
+#             elements.append(Spacer(1, 0.5*cm))
+
+#             elements.append(HRFlowable(width=doc.width, thickness=1, color=colors.black))
+#             elements.append(Spacer(1, 0.5*cm))
+#             footer = Paragraph(
+#                 "Praco Packaging Supplies Ltd. | Account: 22035061 | Sort Code: 04-06-05 | VAT: 454687846",
+#                 normal_style
+#             )
+#             elements.append(footer)
+
+#             doc.build(elements)
+#             buffer.seek(0)
+#             logger.info(f"Successfully generated refund receipt PDF for order {self.id}")
+#             return buffer
+#         except Exception as e:
+#             logger.error(f"Error generating refund receipt PDF for order {self.id}: {str(e)}")
+#             return None
+
+#     def generate_and_save_pdfs(self):
+#         try:
+#             items_exist = self.items.exists()
+#             logger.info(f"Order {self.id} has items: {items_exist}")
+#             if not items_exist:
+#                 logger.warning(f"Skipping PDF generation for order {self.id} due to no items")
+#                 return
+
+#             self.update_order()
+
+#             if not self.invoice:
+#                 invoice_buffer = self.generate_invoice_pdf()
+#                 if invoice_buffer:
+#                     self.invoice.save(
+#                         f'invoice_order_{self.id}.pdf',
+#                         ContentFile(invoice_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     invoice_buffer.close()
+#                     logger.info(f"Invoice PDF generated and saved for order {self.id} at {self.invoice.path}")
+#                 else:
+#                     logger.error(f"Invoice PDF generation failed for order {self.id}")
+
+#             if not self.delivery_note:
+#                 delivery_note_buffer = self.generate_delivery_note_pdf()
+#                 if delivery_note_buffer:
+#                     self.delivery_note.save(
+#                         f'delivery_note_order_{self.id}.pdf',
+#                         ContentFile(delivery_note_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     delivery_note_buffer.close()
+#                     logger.info(f"Delivery note PDF generated and saved for order {self.id} at {self.delivery_note.path}")
+#                 else:
+#                     logger.error(f"Delivery note PDF generation failed for order {self.id}")
+
+#             super(Order, self).save(update_fields=['invoice', 'delivery_note', 'discount'])
+#             logger.info(f"Order {self.id} saved with updated invoice, delivery note, and discount fields")
+#         except Exception as e:
+#             logger.error(f"Error generating and saving PDFs for order {self.id}: {str(e)}")
+#             raise
+
+#     def generate_and_save_payment_receipts(self):
+#         try:
+#             update_fields = []
+#             if self.payment_verified and self.payment_status == 'COMPLETED' and not self.paid_receipt:
+#                 if not self.transaction_id:
+#                     self.transaction_id = str(uuid.uuid4())
+#                     update_fields.append('transaction_id')
+#                 paid_receipt_buffer = self.generate_paid_receipt_pdf()
+#                 if paid_receipt_buffer:
+#                     self.paid_receipt.save(
+#                         f'paid_receipt_order_{self.id}.pdf',
+#                         ContentFile(paid_receipt_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     paid_receipt_buffer.close()
+#                     update_fields.append('paid_receipt')
+#                     logger.info(f"Paid receipt PDF generated and saved for order {self.id} at {self.paid_receipt.path}")
+#                 else:
+#                     logger.error(f"Paid receipt PDF generation failed for order {self.id}")
+
+#             if self.payment_status == 'REFUND' and self.transaction_id and self.payment_receipt and self.refund_transaction_id and self.refund_payment_receipt and self.paid_receipt and not self.refund_receipt:
+#                 refund_receipt_buffer = self.generate_refund_receipt_pdf()
+#                 if refund_receipt_buffer:
+#                     self.refund_receipt.save(
+#                         f'refund_receipt_order_{self.id}.pdf',
+#                         ContentFile(refund_receipt_buffer.getvalue()),
+#                         save=False
+#                     )
+#                     refund_receipt_buffer.close()
+#                     update_fields.append('refund_receipt')
+#                     logger.info(f"Refund receipt PDF generated and saved for order {self.id} at {self.refund_receipt.path}")
+#                 else:
+#                     logger.error(f"Refund receipt PDF generation failed for order {self.id}")
+
+#             if update_fields:
+#                 super(Order, self).save(update_fields=update_fields)
+#                 logger.info(f"Order {self.id} saved with updated fields: {update_fields}")
+#         except Exception as e:
+#             logger.error(f"Error generating and saving payment receipts for order {self.id}: {str(e)}")
+#             raise
+
+# @receiver(pre_save, sender=Order)
+# def handle_payment_verified(sender, instance, **kwargs):
+#     try:
+#         if instance.id:
+#             old_instance = Order.objects.get(id=instance.id)
+#             if old_instance.payment_verified != instance.payment_verified:
+#                 logger.info(f"Payment verified changed for order {instance.id} to {instance.payment_verified}")
+#                 if instance.payment_verified:
+#                     instance.payment_status = 'COMPLETED'
+#                     if not instance.transaction_id:
+#                         instance.transaction_id = str(uuid.uuid4())
+#                     instance.generate_and_save_payment_receipts()
+#                 else:
+#                     instance.payment_status = 'PENDING'
+#                     for field in ['paid_receipt', 'payment_receipt']:
+#                         file_field = getattr(instance, field)
+#                         if file_field:
+#                             file_field.delete(save=False)
+#                             setattr(instance, field, None)
+#                     instance.transaction_id = None
+#     except Exception as e:
+#         logger.error(f"Error handling payment verified for order {instance.id}: {str(e)}")
+
+# @receiver(post_save, sender=Order)
+# def handle_order_creation(sender, instance, created, **kwargs):
+#     if created:
+#         logger.info(f"Order {instance.id} created, handling post-creation tasks")
+#         try:
+#             if instance.invoice and instance.user.email:
+#                 user_name = instance.user.get_full_name() if hasattr(instance.user, 'get_full_name') else instance.user.username
+#                 subject = f"Invoice for Order #{instance.id}"
+#                 body = (
+#                     f'<p>Dear {user_name},</p>'
+#                     f'<p>Thank you for your purchase with Praco Packaging.</p>'
+#                     f'<p>Please find attached the invoice for your order #{instance.id}.</p>'
+#                 )
+#                 attachments = [(f'invoice_order_{instance.id}.pdf', instance.invoice.read(), 'application/pdf')]
+#                 success = send_email(subject, body, instance.user.email, is_html=True, attachments=attachments)
+#                 if success:
+#                     logger.info(f"Invoice email sent to {instance.user.email} for order {instance.id}")
+#                 else:
+#                     logger.error(f"Failed to send invoice email for order {instance.id}")
+#         except Exception as e:
+#             logger.error(f"Error sending invoice email for order {instance.id}: {str(e)}")
+
+# @receiver(post_save, sender=Order)
+# def handle_payment_status_change(sender, instance, **kwargs):
+#     try:
+#         if instance.id:
+#             old_instance = Order.objects.get(id=instance.id)
+#             if old_instance.payment_status != instance.payment_status:
+#                 logger.info(f"Payment status changed for order {instance.id} to {instance.payment_status}")
+#                 if instance.payment_status == 'COMPLETED':
+#                     instance.generate_and_save_payment_receipts()
+#                     if instance.delivery_note:
+#                         subject = f"Delivery Note for Order #{instance.id}"
+#                         body = (
+#                             f'<p>Dear Team,</p>'
+#                             f'<p>Please find attached the delivery note for order #{instance.id} from Praco Packaging.</p>'
+#                             f'<p>For any inquiries, please contact our logistics team at <a href="mailto:logistics@pracopackaging.com" class="text-blue-600 hover:underline">logistics@pracopackaging.com</a>.</p>'
+#                         )
+#                         attachments = [(f'delivery_note_order_{instance.id}.pdf', instance.delivery_note.read(), 'application/pdf')]
+#                         success = send_email(subject, body, 'siddiqui.faizmuhammad@gmail.com', is_html=True, attachments=attachments)
+#                         if success:
+#                             logger.info(f"Delivery note email sent to siddiqui.faizmuhammad@gmail.com for order {instance.id}")
+#                         else:
+#                             logger.error(f"Failed to send delivery note email for order {instance.id}")
+#                 elif instance.payment_status == 'REFUND':
+#                     instance.generate_and_save_payment_receipts()
+#     except Exception as e:
+#         logger.error(f"Error handling payment status change for order {instance.id}: {str(e)}")
+
 class Order(models.Model):
     STATUS_CHOICES = (
         ('PENDING', 'Pending'),
@@ -1315,11 +3073,22 @@ class Order(models.Model):
     )
     PAYMENT_METHOD_CHOICES = (
         ('manual_payment', 'Manual Payment'),
+        ('stripe', 'Stripe Payment'),
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    shipping_address = models.ForeignKey('ShippingAddress', on_delete=models.SET_NULL, null=True)
-    billing_address = models.ForeignKey('BillingAddress', on_delete=models.SET_NULL, null=True)
+    shipping_address = models.ForeignKey(
+        Address, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='orders_as_shipping'
+    )
+    billing_address = models.ForeignKey(
+        Address, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        related_name='orders_as_billing'
+    )
     shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, editable=False)
     vat = models.DecimalField(
         max_digits=5,
@@ -1339,8 +3108,7 @@ class Order(models.Model):
     payment_method = models.CharField(
         max_length=50,
         choices=PAYMENT_METHOD_CHOICES,
-        default='manual_payment',
-        editable=False
+        default='manual_payment'
     )
     transaction_id = models.CharField(max_length=100, blank=True, null=True)
     payment_receipt = models.FileField(upload_to='receipts/', blank=True, null=True)
@@ -1363,44 +3131,45 @@ class Order(models.Model):
 
     def clean(self):
         errors = {}
-        if self.payment_verified:
-            if not self.transaction_id:
-                errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
-            if not self.payment_receipt:
-                errors['payment_receipt'] = 'Payment receipt is required when payment is verified.'
-            if self.payment_status in ['FAILED', 'PENDING']:
-                errors['payment_status'] = 'Payment status must be Completed/Refunded when payment is verified.'
-        
-        if self.payment_status == 'COMPLETED':
-            if not self.transaction_id:
-                errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
-            if not self.payment_receipt:
-                errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
-        
-        elif self.payment_status == 'REFUND':
-            if not self.transaction_id:
-                errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
-            if not self.payment_receipt:
-                errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
-            if not self.refund_transaction_id:
-                errors['refund_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
-            if not self.refund_payment_receipt:
-                errors['refund_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
+        # Skip transaction_id and payment_receipt validations for Stripe payments
+        if self.payment_method != 'stripe':
+            if self.payment_verified:
+                if not self.transaction_id:
+                    errors['transaction_id'] = 'Transaction ID is required when payment is verified.'
+                if not self.payment_receipt:
+                    errors['payment_receipt'] = 'Payment receipt is required when payment is verified.'
+                if self.payment_status in ['FAILED', 'PENDING']:
+                    errors['payment_status'] = 'Payment status must be Completed/Refunded when payment is verified.'
+            
+            if self.payment_status == 'COMPLETED':
+                if not self.transaction_id:
+                    errors['transaction_id'] = 'Transaction ID is required when payment status is Completed.'
+                if not self.payment_receipt:
+                    errors['payment_receipt'] = 'Payment receipt is required when payment status is Completed.'
+            
+            elif self.payment_status == 'REFUND':
+                if not self.transaction_id:
+                    errors['transaction_id'] = 'Transaction ID is required when payment status is Refunded.'
+                if not self.payment_receipt:
+                    errors['payment_receipt'] = 'Payment receipt is required when payment status is Refunded.'
+                if not self.refund_transaction_id:
+                    errors['refund_transaction_id'] = 'Refunded transaction ID is required when payment status is Refunded.'
+                if not self.refund_payment_receipt:
+                    errors['refund_payment_receipt'] = 'Refunded payment receipt is required when payment status is Refunded.'
 
-        for field, field_name in [(self.payment_receipt, 'payment_receipt'), (self.refund_payment_receipt, 'refund_payment_receipt')]:
-            if field:
-                ext = field.name.lower().split('.')[-1]
-                if ext not in ['png', 'jpg', 'jpeg', 'pdf']:
-                    errors[field_name] = 'File must be a PNG, JPG, or PDF.'
+            for field, field_name in [(self.payment_receipt, 'payment_receipt'), (self.refund_payment_receipt, 'refund_payment_receipt')]:
+                if field:
+                    ext = field.name.lower().split('.')[-1]
+                    if ext not in ['png', 'jpg', 'jpeg', 'pdf']:
+                        errors[field_name] = 'File must be a PNG, JPG, or PDF.'
+
+        if self.payment_status == 'REFUND' and not self.paid_receipt:
+            errors['__all__'] = 'Paid receipt must exist when payment status is Refunded.'
 
         if errors:
             raise ValidationError(errors)
 
-        if self.payment_status == 'REFUND' and not self.paid_receipt:
-            raise ValidationError({'__all__': 'Paid receipt must exist when payment status is Refunded.'})
-
     def calculate_subtotal(self):
-        """Calculate the overall subtotal by summing the totals of all OrderItems after UserExclusivePrice discounts."""
         try:
             total = Decimal('0.00')
             for item in self.items.all():
@@ -1413,7 +3182,6 @@ class Order(models.Model):
             return Decimal('0.00')
 
     def calculate_original_subtotal(self):
-        """Calculate the overall subtotal after UserExclusivePrice discounts (same as calculate_subtotal)."""
         try:
             total = self.calculate_subtotal()
             logger.info(f"Order {self.id} original subtotal: {total}")
@@ -1423,15 +3191,8 @@ class Order(models.Model):
             return Decimal('0.00')
 
     def calculate_total(self):
-        """
-        Calculate the overall total:
-        1. Start with overall subtotal (sum of item totals after UserExclusivePrice discounts).
-        2. Apply order-level discount.
-        3. Add VAT (e.g., 20% of discounted subtotal).
-        4. Add shipping cost.
-        """
         try:
-            subtotal = self.calculate_subtotal()  # After UserExclusivePrice discounts
+            subtotal = self.calculate_subtotal()
             discount_amount = (subtotal * self.discount) / Decimal('100.00')
             discounted_subtotal = subtotal - discount_amount
             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
@@ -1444,21 +3205,19 @@ class Order(models.Model):
             return Decimal('0.00')
 
     def calculate_total_weight(self):
-        """Calculate the total weight of all OrderItems."""
         try:
-            total_weight = Decimal('0.00')
+            total_weight = Decimal('0.00000000')
             for item in self.items.all():
                 item_weight_kg = item.calculate_weight()
                 total_units = item.total_units
                 total_weight += item_weight_kg * Decimal(total_units)
             logger.info(f"Order {self.id} total weight: {total_weight}")
-            return total_weight.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            return total_weight.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP)
         except Exception as e:
             logger.error(f"Error calculating total weight for order {self.id}: {str(e)}")
-            return Decimal('0.00')
+            return Decimal('0.00000000')
 
     def calculate_total_units_and_packs(self):
-        """Calculate total units and packs across all OrderItems."""
         try:
             total_units = 0
             total_packs = 0
@@ -1473,7 +3232,6 @@ class Order(models.Model):
             return 0, 0
 
     def update_order(self):
-        """Update order calculations."""
         try:
             self.calculate_total()
             super().save(update_fields=['discount'])
@@ -1532,9 +3290,14 @@ class Order(models.Model):
             details_data = [
                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
                 [Paragraph("Due Date:", bold_style), Paragraph(due_date.strftime('%d/%m/%Y'), normal_style)],
-                [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.2f} kg", normal_style)],
-                [Paragraph("Total Due:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+                [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
+                [Paragraph("Total Due:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)]
             ]
+            if self.payment_method == 'stripe':
+                transaction = self.transactions.first()
+                details_data.append([Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
+                if transaction:
+                    details_data.append([Paragraph("Transaction ID:", bold_style), Paragraph(transaction.stripe_payment_intent_id, normal_style)])
             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
             details_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -1543,8 +3306,7 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            # Updated to include Units column
-            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items: {items_exist}")
@@ -1553,36 +3315,33 @@ class Order(models.Model):
                     try:
                         original_item_subtotal = item.calculate_original_subtotal()
                         item_subtotal = item.calculate_subtotal()
-                        pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first() 
+                        pricing_data = PricingTierData.objects.filter(pricing_tier=item.pricing_tier, item=item.item).first()
                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
                         discount_percent = item.calculate_discount_percentage()
                         original_subtotal += item_subtotal
-                        total_display = f"€{item_subtotal:.2f}"
+                        total_display = f"£{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
                         
-                        # Calculate units
                         units_per_pack = item.item.units_per_pack or 1
                         total_units = item.pack_quantity * units_per_pack
                         
                         data.append([
                             item.item.sku or "N/A",
-                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
-                            str(total_units),  # Units column
-                            f"€{(unit_price * units_per_pack):.2f}",
-                            f"€{original_item_subtotal:.2f}",
+                            str(total_units),
+                            f"£{unit_price:.2f}",
+                            f"£{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for invoice: {str(e)}")
-                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
             else:
                 logger.warning(f"No items found for order {self.id}")
-                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+                data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
             
-            # Updated column widths to accommodate new Units column
-            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[3.5*cm, 2.5*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1603,11 +3362,11 @@ class Order(models.Model):
             discounted_subtotal = subtotal - discount_amount
             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
             totals_data = [
-                ['', 'Subtotal', f"€{subtotal:.2f}"],
-                ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
-                ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
-                ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
-                ['', 'Total', f"€{total_due:.2f}"]
+                ['', 'Subtotal', f"£{subtotal:.2f}"],
+                ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+                ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+                ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+                ['', 'Total', f"£{total_due:.2f}"]
             ]
             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
             totals_table.setStyle(TableStyle([
@@ -1683,8 +3442,12 @@ class Order(models.Model):
             total_weight = self.calculate_total_weight()
             details_data = [
                 [Paragraph("Date:", bold_style), Paragraph(self.created_at.strftime('%d/%m/%Y'), normal_style)],
-                [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.2f} kg", normal_style)],
+                [Paragraph("Total Weight:", bold_style), Paragraph(f"{total_weight:.3f} kg", normal_style)],
             ]
+            if self.payment_method == 'stripe':
+                transaction = self.transactions.first()
+                if transaction:
+                    details_data.append([Paragraph("Transaction ID:", bold_style), Paragraph(transaction.stripe_payment_intent_id, normal_style)])
             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
             details_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -1693,8 +3456,7 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            # Updated to include Units column
-            data = [['SKU', 'Boxes', 'Units', 'Total Units']]
+            data = [['SKU', 'Packs', 'Units', 'Total Units']]
             items_exist = self.items.exists()
             logger.info(f"Order {self.id} has items for delivery note: {items_exist}")
             if items_exist:
@@ -1704,20 +3466,18 @@ class Order(models.Model):
                         total_units = item.pack_quantity * units_per_pack
                         data.append([
                             item.item.sku or "N/A",
-                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
-                            str(total_units),  # Units column
+                            str(total_units),
                             str(item.total_units)
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for delivery note: {str(e)}")
-                        data.append(["N/A", "Error", "0", "0", "0"])
+                        data.append(["N/A", "Error", "0", "0"])
             else:
                 logger.warning(f"No items found for order {self.id}")
-                data.append(["N/A", "No items available", "0", "0", "0"])
+                data.append(["N/A", "No items available", "0", "0"])
             
-            # Updated column widths to accommodate new Units column
-            table = Table(data, colWidths=[3.5*cm, 5*cm, 2*cm, 2*cm, 3*cm])
+            table = Table(data, colWidths=[3.5*cm, 5*cm, 2*cm, 2*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1798,9 +3558,16 @@ class Order(models.Model):
             details_data = [
                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
                 [Paragraph("Transaction ID:", bold_style), Paragraph(self.transaction_id or "N/A", normal_style)],
-                [Paragraph("Payment Receipt:", bold_style), Paragraph(f'<a href="{payment_receipt_link}">View Receipt</a>', orange_style)],
-                [Paragraph("Total Paid:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+                [Paragraph("Total Paid:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)],
             ]
+            if self.payment_method == 'manual_payment' and self.payment_receipt:
+                details_data.insert(2, [Paragraph("Payment Receipt:", bold_style), Paragraph(f'<a href="{payment_receipt_link}">View Receipt</a>', orange_style)])
+            if self.payment_method == 'stripe':
+                transaction = self.transactions.first()
+                if transaction:
+                    details_data.insert(1, [Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
+
+
             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
             details_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -1809,8 +3576,7 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            # Updated to include Units column
-            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1822,31 +3588,28 @@ class Order(models.Model):
                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
                         discount_percent = item.calculate_discount_percentage()
                         original_subtotal += item_subtotal
-                        total_display = f"€{item_subtotal:.2f}"
+                        total_display = f"£{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
                         
-                        # Calculate units
                         units_per_pack = item.item.units_per_pack or 1
                         total_units = item.pack_quantity * units_per_pack
                         
                         data.append([
                             item.item.sku or "N/A",
-                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
-                            str(total_units),  # Units column
-                            f"€{(unit_price * units_per_pack):.2f}",
-                            f"€{original_item_subtotal:.2f}",
+                            str(total_units),
+                            f"£{unit_price:.2f}",
+                            f"£{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for paid receipt: {str(e)}")
-                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
             else:
-                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+                data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
             
-            # Updated column widths to accommodate new Units column
-            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[3.5*cm, 2.5*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -1867,11 +3630,11 @@ class Order(models.Model):
             discounted_subtotal = subtotal - discount_amount
             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
             totals_data = [
-                ['', 'Subtotal', f"€{subtotal:.2f}"],
-                ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
-                ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
-                ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
-                ['', 'Total', f"€{total_due:.2f}"]
+                ['', 'Subtotal', f"£{subtotal:.2f}"],
+                ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+                ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+                ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+                ['', 'Total', f"£{total_due:.2f}"]
             ]
             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
             totals_table.setStyle(TableStyle([
@@ -1941,15 +3704,19 @@ class Order(models.Model):
             ]))
             elements.append(address_table)
             elements.append(Spacer(1, 0.5*cm))
-            refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_payment_receipt else "N/A"
 
+            refund_payment_receipt_link = self.refund_payment_receipt.url if self.refund_payment_receipt else "N/A"
             total_due = self.calculate_total()
             details_data = [
                 [Paragraph("Date:", bold_style), Paragraph(self.updated_at.strftime('%d/%m/%Y'), normal_style)],
                 [Paragraph("Refund Transaction ID:", bold_style), Paragraph(self.refund_transaction_id or "N/A", normal_style)],
                 [Paragraph("Refund Payment Receipt:", bold_style), Paragraph(f'<a href="{refund_payment_receipt_link}">View Receipt</a>', orange_style)],
-                [Paragraph("Total Refund:", bold_style), Paragraph(f"€{total_due:.2f}", orange_style)]
+                [Paragraph("Total Refund:", bold_style), Paragraph(f"£{total_due:.2f}", orange_style)],
             ]
+            if self.payment_method == 'stripe':
+                transaction = self.transactions.first()
+                if transaction:
+                    details_data.insert(1, [Paragraph("Payment Method:", bold_style), Paragraph("Stripe", normal_style)])
             details_table = Table(details_data, colWidths=[4*cm, 12*cm])
             details_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -1958,8 +3725,7 @@ class Order(models.Model):
             elements.append(details_table)
             elements.append(Spacer(1, 0.5*cm))
 
-            # Updated to include Units column
-            data = [['SKU', 'Boxes', 'Units', 'Box Price', 'Subtotal', 'Total']]
+            data = [['SKU', 'Boxes', 'Units', 'Unit Price', 'Subtotal', 'Total']]
             original_subtotal = Decimal('0.00')
             items_exist = self.items.exists()
             if items_exist:
@@ -1971,31 +3737,28 @@ class Order(models.Model):
                         unit_price = pricing_data.price if pricing_data else Decimal('0.00')
                         discount_percent = item.calculate_discount_percentage()
                         original_subtotal += item_subtotal
-                        total_display = f"€{item_subtotal:.2f}"
+                        total_display = f"£{item_subtotal:.2f}"
                         if discount_percent > 0:
                             total_display += f"\n{discount_percent}% off"
                         
-                        # Calculate units
                         units_per_pack = item.item.units_per_pack or 1
                         total_units = item.pack_quantity * units_per_pack
                         
                         data.append([
                             item.item.sku or "N/A",
-                            # item.item.title[:18] if item.item.title else "N/A",
                             str(item.pack_quantity),
-                            str(total_units),  # Units column
-                            f"€{(unit_price * units_per_pack):.2f}",
-                            f"€{original_item_subtotal:.2f}",
+                            str(total_units),
+                            f"£{unit_price:.2f}",
+                            f"£{original_item_subtotal:.2f}",
                             total_display
                         ])
                     except Exception as e:
                         logger.error(f"Error processing item {item.id} for refund receipt: {str(e)}")
-                        data.append(["N/A", "Error", "0", "0", "€0.00", "€0.00", "€0.00"])
+                        data.append(["N/A", "Error", "0", "0", "£0.00", "£0.00"])
             else:
-                data.append(["N/A", "No items available", "0", "0", "€0.00", "€0.00", "€0.00"])
+                data.append(["N/A", "No items available", "0", "0", "£0.00", "£0.00"])
             
-            # Updated column widths to accommodate new Units column
-            table = Table(data, colWidths=[3.5*cm, 3*cm, 2*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
+            table = Table(data, colWidths=[3.5*cm, 2.5*cm, 2*cm, 2.5*cm, 2.5*cm, 2.5*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -2016,11 +3779,11 @@ class Order(models.Model):
             discounted_subtotal = subtotal - discount_amount
             vat_amount = (discounted_subtotal * self.vat) / Decimal('100.00')
             totals_data = [
-                ['', 'Subtotal', f"€{subtotal:.2f}"],
-                ['', f'Coupon Discount ({self.discount:.2f}%)', f"€{discount_amount:.2f}"],
-                ['', f'VAT ({self.vat:.2f}%)', f"€{vat_amount:.2f}"],
-                ['', 'Shipping Cost', f"€{self.shipping_cost:.2f}"],
-                ['', 'Total', f"€{total_due:.2f}"]
+                ['', 'Subtotal', f"£{subtotal:.2f}"],
+                ['', f'Coupon Discount ({self.discount:.2f}%)', f"£{discount_amount:.2f}"],
+                ['', f'VAT ({self.vat:.2f}%)', f"£{vat_amount:.2f}"],
+                ['', 'Shipping Cost', f"£{self.shipping_cost:.2f}"],
+                ['', 'Total', f"£{total_due:.2f}"]
             ]
             totals_table = Table(totals_data, colWidths=[9*cm, 3*cm, 3*cm])
             totals_table.setStyle(TableStyle([
@@ -2093,9 +3856,17 @@ class Order(models.Model):
         try:
             update_fields = []
             if self.payment_verified and self.payment_status == 'COMPLETED' and not self.paid_receipt:
-                if not self.transaction_id:
+                if self.payment_method == 'stripe':
+                    # For Stripe, use transaction.stripe_payment_intent_id if available
+                    transaction = self.transactions.first()
+                    if transaction and transaction.stripe_payment_intent_id and not self.transaction_id:
+                        self.transaction_id = transaction.stripe_payment_intent_id
+                        update_fields.append('transaction_id')
+                elif not self.transaction_id:
+                    # For manual payments, generate a UUID if no transaction_id
                     self.transaction_id = str(uuid.uuid4())
                     update_fields.append('transaction_id')
+                
                 paid_receipt_buffer = self.generate_paid_receipt_pdf()
                 if paid_receipt_buffer:
                     self.paid_receipt.save(
@@ -2109,7 +3880,13 @@ class Order(models.Model):
                 else:
                     logger.error(f"Paid receipt PDF generation failed for order {self.id}")
 
-            if self.payment_status == 'REFUND' and self.transaction_id and self.payment_receipt and self.refund_transaction_id and self.refund_payment_receipt and self.paid_receipt and not self.refund_receipt:
+            if self.payment_status == 'REFUND' and self.transaction_id and self.refund_transaction_id and self.paid_receipt and not self.refund_receipt:
+                if self.payment_method != 'stripe' and not self.payment_receipt:
+                    logger.error(f"Payment receipt required for refund with manual payment for order {self.id}")
+                    return
+                if self.payment_method != 'stripe' and not self.refund_payment_receipt:
+                    logger.error(f"Refund payment receipt required for refund with manual payment for order {self.id}")
+                    return
                 refund_receipt_buffer = self.generate_refund_receipt_pdf()
                 if refund_receipt_buffer:
                     self.refund_receipt.save(
@@ -2125,59 +3902,11 @@ class Order(models.Model):
 
             if update_fields:
                 super(Order, self).save(update_fields=update_fields)
-                logger.info(f"Order {self.id} saved with updated receipt fields: {update_fields}")
+                logger.info(f"Order {self.id} saved with updated fields: {update_fields}")
         except Exception as e:
             logger.error(f"Error generating and saving payment receipts for order {self.id}: {str(e)}")
             raise
 
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-        update_fields = kwargs.get('update_fields', [])
-        if self.items.exists() and not any(field in update_fields for field in ['invoice', 'delivery_note', 'discount', 'paid_receipt', 'refund_receipt']):
-            self.update_order()
-            self.generate_and_save_pdfs()
-            if self.payment_verified or self.payment_status in ['COMPLETED', 'REFUND']:
-                self.generate_and_save_payment_receipts()
-
-    def update_order_items(self, new_item):
-        """Update order with a new or existing item."""
-        try:
-            OrderItem.objects.create(
-                order=self,
-                item=new_item['item'],
-                pricing_tier=new_item.get('pricing_tier'),
-                pack_quantity=new_item.get('pack_quantity', 1),
-                unit_type=new_item.get('unit_type', 'pack'),
-                user_exclusive_price=new_item.get('user_exclusive_price')
-            )
-            self.update_order()
-            for field in ['invoice', 'delivery_note', 'paid_receipt', 'refund_receipt']:
-                file_field = getattr(self, field)
-                if file_field:
-                    file_field.delete(save=False)
-            self.generate_and_save_pdfs()
-            if self.payment_verified or self.payment_status in ['COMPLETED', 'REFUND']:
-                self.generate_and_save_payment_receipts()
-            logger.info(f"Updated order {self.id} with new item")
-        except Exception as e:
-            logger.error(f"Error updating order {self.id}: {str(e)}")
-            raise
-
-    def delete(self, *args, **kwargs):
-        try:
-            for field in ['payment_receipt', 'refund_payment_receipt', 'paid_receipt', 'refund_receipt', 'invoice', 'delivery_note']:
-                file_field = getattr(self, field)
-                if file_field:
-                    file_field.delete(save=False)
-                    logger.info(f"Deleted {field} for order {self.id}")
-        except Exception as e:
-            logger.error(f"Error deleting files for order {self.id}: {str(e)}")
-        super().delete(*args, **kwargs)
-
-    def __str__(self):
-        return f"Order {self.id} - {self.status}"
-    
 @receiver(pre_save, sender=Order)
 def handle_payment_verified(sender, instance, **kwargs):
     try:
@@ -2187,16 +3916,24 @@ def handle_payment_verified(sender, instance, **kwargs):
                 logger.info(f"Payment verified changed for order {instance.id} to {instance.payment_verified}")
                 if instance.payment_verified:
                     instance.payment_status = 'COMPLETED'
-                    if not instance.transaction_id:
+                    if instance.payment_method == 'stripe':
+                        # Set transaction_id from Transaction model for Stripe
+                        transaction = instance.transactions.first()
+                        if transaction and transaction.stripe_payment_intent_id:
+                            instance.transaction_id = transaction.stripe_payment_intent_id
+                    elif not instance.transaction_id:
+                        # Generate UUID for manual payments
                         instance.transaction_id = str(uuid.uuid4())
                     instance.generate_and_save_payment_receipts()
                 else:
                     instance.payment_status = 'PENDING'
-                    for field in ['paid_receipt', 'payment_receipt']:
-                        file_field = getattr(instance, field)
-                        if file_field:
-                            file_field.delete(save=False)
-                            setattr(instance, field, None)
+                    if instance.payment_method != 'stripe':
+                        # Only clear payment_receipt for non-Stripe payments
+                        for field in ['paid_receipt', 'payment_receipt']:
+                            file_field = getattr(instance, field)
+                            if file_field:
+                                file_field.delete(save=False)
+                                setattr(instance, field, None)
                     instance.transaction_id = None
     except Exception as e:
         logger.error(f"Error handling payment verified for order {instance.id}: {str(e)}")
@@ -2231,6 +3968,12 @@ def handle_payment_status_change(sender, instance, **kwargs):
             if old_instance.payment_status != instance.payment_status:
                 logger.info(f"Payment status changed for order {instance.id} to {instance.payment_status}")
                 if instance.payment_status == 'COMPLETED':
+                    if instance.payment_method == 'stripe':
+                        # Set transaction_id from Transaction model for Stripe
+                        transaction = instance.transactions.first()
+                        if transaction and transaction.stripe_payment_intent_id and not instance.transaction_id:
+                            instance.transaction_id = transaction.stripe_payment_intent_id
+                            instance.save(update_fields=['transaction_id'])
                     instance.generate_and_save_payment_receipts()
                     if instance.delivery_note:
                         subject = f"Delivery Note for Order #{instance.id}"
@@ -2286,13 +4029,13 @@ class OrderItem(models.Model):
         """Calculate the weight per unit."""
         try:
             if not self.item:
-                return Decimal('0.00')
-            weight = self.item.weight or Decimal('0.00')
+                return Decimal('0.00000000')
+            weight = self.item.weight or Decimal('0.00000000')
             weight_unit = self.item.weight_unit or 'kg'
             return self.convert_weight_to_kg(weight, weight_unit)
         except Exception as e:
             logger.error(f"Error calculating weight for order item {self.id}: {str(e)}")
-            return Decimal('0.00')
+            return Decimal('0.00000000')
 
     def calculate_discount_percentage(self):
         """Calculate the discount percentage from UserExclusivePrice."""
@@ -2308,20 +4051,20 @@ class OrderItem(models.Model):
         """Convert weight to kilograms."""
         try:
             if weight is None or weight_unit is None:
-                return Decimal('0.00')
+                return Decimal('0.00000000')
             weight = Decimal(str(weight))
             if weight_unit == 'lb':
-                return (weight * Decimal('0.453592')).quantize(Decimal('0.01'))
+                return (weight * Decimal('0.453592')).quantize(Decimal('0.00000001'))
             elif weight_unit == 'oz':
-                return (weight * Decimal('0.0283495')).quantize(Decimal('0.01'))
+                return (weight * Decimal('0.0283495')).quantize(Decimal('0.00000001'))
             elif weight_unit == 'g':
-                return (weight * Decimal('0.001')).quantize(Decimal('0.01'))
+                return (weight * Decimal('0.001')).quantize(Decimal('0.00000001'))
             elif weight_unit == 'kg':
-                return weight.quantize(Decimal('0.01'))
-            return Decimal('0.00')
+                return weight.quantize(Decimal('0.00000001'))
+            return Decimal('0.00000000')
         except Exception as e:
             logger.error(f"Error converting weight for order item {self.id}: {str(e)}")
-            return Decimal('0.00')
+            return Decimal('0.00000000')
 
     @property
     def total_units(self):
@@ -2443,8 +4186,9 @@ class OrderItem(models.Model):
         except Exception as e:
             logger.error(f"Error saving order item {self.id}: {str(e)}")
             raise ValidationError({"__all__": "An unexpected error occurred while saving the order item."})
+        # email template
 
-# email template
+
 # testing
 # deploy
 # products upload

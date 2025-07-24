@@ -4,7 +4,7 @@ from ecommerce.views import (
     CategoryViewSet, ProductViewSet, ProductImageViewSet, ProductVariantViewSet,
     PricingTierViewSet, PricingTierDataViewSet, TableFieldViewSet, ItemViewSet,
     ItemImageViewSet, ItemDataViewSet, UserExclusivePriceViewSet,
-    CartViewSet, CartItemViewSet, OrderViewSet, OrderItemViewSet, ShippingAddressViewSet, BillingAddressViewSet
+    CartViewSet, CartItemViewSet, OrderViewSet, OrderItemViewSet, AddressViewSet, CreatePaymentIntentView
 )
 
 router = DefaultRouter()
@@ -23,10 +23,11 @@ router.register(r'carts', CartViewSet)
 router.register(r'cart-items', CartItemViewSet)
 router.register(r'orders', OrderViewSet)
 router.register(r'order-items', OrderItemViewSet)
-router.register(r'shipping-addresses', ShippingAddressViewSet)
-router.register(r'billing-addresses', BillingAddressViewSet)
+router.register(r'addresses', AddressViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
     path("ckeditor5/", include('django_ckeditor_5.urls')),
+        path('create-payment-intent/', CreatePaymentIntentView.as_view(), name='create-payment-intent'),
+
 ]

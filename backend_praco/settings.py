@@ -372,3 +372,9 @@ EMAIL_USE_TLS = True  # Use TLS for secure connection
 EMAIL_HOST_USER = 'noreply.praco@gmail.com'  # Your email address
 EMAIL_HOST_PASSWORD = 'xjqm asck ygtn vxce'  # App-specific password (not your regular password)
 DEFAULT_FROM_EMAIL = 'noreply.praco@gmail.com'  # Default sender email
+
+
+from decouple import config
+
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY')
+STRIPE_PUBLISHABLE_KEY = config('STRIPE_PUBLISHABLE_KEY')
